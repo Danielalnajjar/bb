@@ -10,12 +10,13 @@ publishes an idle BB thread only after durable verification.
 
 ## Reading order
 
-1. [Product design](product-design.md) — the consolidated design-team recommendation.
-2. [Technical research](technical-research.md) — BB and Claude Agent SDK findings.
-3. [Unknowns](unknowns.md) — unresolved questions and risk inventory from discovery.
-4. [Plan zero](plan-zero.md) — research routing and initial implementation framing.
-5. [ExecPlan](exec-plan.md) — the current decision-complete implementation plan and resume checkpoint.
-6. [Omega reviews](reviews/) — raw completed hardening, discovery, and adversarial reports.
+1. [`/handoff`](HANDOFF.md) — the durable resume checkpoint, boundaries, and next actions.
+2. [Product design](product-design.md) — the consolidated design-team recommendation.
+3. [Technical research](technical-research.md) — BB and Claude Agent SDK findings.
+4. [Unknowns](unknowns.md) — unresolved questions and risk inventory from discovery.
+5. [Plan zero](plan-zero.md) — research routing and initial implementation framing.
+6. [ExecPlan](exec-plan.md) — the current decision-complete implementation plan and resume checkpoint.
+7. [Omega reviews](reviews/) — raw completed hardening, discovery, and adversarial reports.
 
 ## Completed review ledger
 
