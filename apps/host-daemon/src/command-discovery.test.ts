@@ -414,7 +414,33 @@ describe("discoverProviderCommands over declared roots", () => {
     expect(byName(commands, "linked-dir:secret")).toBeUndefined();
   });
 
-  it("shares the entry-count cap across recursive roots", async () => {
+  it("caps a single recursive skill root at 1,000 entries", async () => {
+    const fixture = await makeWorkspaceFixture();
+    const fullRoot = path.join(fixture.cwd, "full-root");
+    await Promise.all(
+      Array.from({ length: 1_001 }, (_, index) => {
+        const name = `s${String(index).padStart(4, "0")}`;
+        return writeFileEnsuringDir(
+          path.join(fullRoot, name, "SKILL.md"),
+          skillFile(name),
+        );
+      }),
+    );
+
+    const commands = await discover(
+      fixture,
+      fixture.cwd,
+      nativeRoots({
+        skills: {
+          project: [declared("full-root", { recursive: true })],
+        },
+      }),
+    );
+
+    expect(commands).toHaveLength(1_000);
+  });
+
+  it("gives each recursive skill root its own entry-count cap", async () => {
     const fixture = await makeWorkspaceFixture();
     const fullRoot = path.join(fixture.cwd, "full-root");
     const secondRoot = path.join(fixture.cwd, "second-root");
@@ -441,7 +467,45 @@ describe("discoverProviderCommands over declared roots", () => {
       }),
     );
 
-    expect(byName(commands, "late")).toBeUndefined();
+    expect(byName(commands, "late")).toMatchObject({
+      name: "late",
+      source: "skill",
+      origin: "project",
+    });
+  });
+
+  it("does not spend the recursive budget on files inside a skill package", async () => {
+    const fixture = await makeWorkspaceFixture();
+    const skillsRoot = path.join(fixture.cwd, ".agent", "skills");
+    await Promise.all(
+      Array.from({ length: 1_000 }, (_, index) =>
+        writeFileEnsuringDir(
+          path.join(skillsRoot, "fat", "resource", `file-${index}.txt`),
+          "",
+        ),
+      ),
+    );
+    await writeFileEnsuringDir(
+      path.join(skillsRoot, "fat", "SKILL.md"),
+      skillFile("fat"),
+    );
+    await writeFileEnsuringDir(
+      path.join(skillsRoot, "sibling", "SKILL.md"),
+      skillFile("sibling"),
+    );
+
+    const commands = await discover(
+      fixture,
+      fixture.cwd,
+      nativeRoots({
+        skills: {
+          project: [declared(".agent/skills", { recursive: true })],
+        },
+      }),
+    );
+
+    expect(byName(commands, "fat")).toBeDefined();
+    expect(byName(commands, "sibling")).toBeDefined();
   });
 
   it("rejects a recursive project root linked outside the workspace", async () => {
@@ -571,6 +635,102 @@ describe("discoverProviderCommands over declared roots", () => {
       description: "linked file",
       argumentHint: null,
     });
+  });
+
+  it("follows user-origin skill directory and file symlinks in recursive roots", async () => {
+    const fixture = await makeWorkspaceFixture();
+    const skillsRoot = path.join(fixture.homeDir, ".agents", "skills");
+    await mkdir(skillsRoot, { recursive: true });
+
+    const linkedDirectoryTarget = path.join(
+      tempRoot,
+      "recursive-linked-directory-target",
+    );
+    await writeFileEnsuringDir(
+      path.join(linkedDirectoryTarget, "SKILL.md"),
+      skillFile("symlinked-directory", "linked directory"),
+    );
+    await writeFileEnsuringDir(
+      path.join(linkedDirectoryTarget, "resource", "payload.bin"),
+      "payload",
+    );
+    await symlink(
+      linkedDirectoryTarget,
+      path.join(skillsRoot, "symlinked-directory"),
+    );
+
+    const symlinkedFileTarget = path.join(
+      tempRoot,
+      "recursive-linked-file-target.md",
+    );
+    await writeFileEnsuringDir(
+      symlinkedFileTarget,
+      skillFile("symlinked-file", "linked file"),
+    );
+    const symlinkedFileSkillRoot = path.join(skillsRoot, "symlinked-file");
+    await mkdir(symlinkedFileSkillRoot, { recursive: true });
+    await symlink(
+      symlinkedFileTarget,
+      path.join(symlinkedFileSkillRoot, "SKILL.md"),
+    );
+
+    const commands = await discover(
+      fixture,
+      fixture.cwd,
+      nativeRoots({
+        skills: {
+          user: [declared(".agents/skills", { recursive: true })],
+        },
+      }),
+    );
+
+    expect(byName(commands, "symlinked-directory")).toEqual({
+      name: "symlinked-directory",
+      source: "skill",
+      origin: "user",
+      description: "linked directory",
+      argumentHint: null,
+    });
+    expect(byName(commands, "symlinked-file")).toEqual({
+      name: "symlinked-file",
+      source: "skill",
+      origin: "user",
+      description: "linked file",
+      argumentHint: null,
+    });
+  });
+
+  it("does not follow project-origin inner skill symlinks in recursive roots", async () => {
+    const fixture = await makeWorkspaceFixture();
+    const skillsRoot = path.join(fixture.cwd, ".agents", "skills");
+    await mkdir(skillsRoot, { recursive: true });
+
+    const outsideSkillDirectory = path.join(
+      tempRoot,
+      "recursive-outside-skill-directory",
+    );
+    await writeFileEnsuringDir(
+      path.join(outsideSkillDirectory, "SKILL.md"),
+      skillFile("leaked"),
+    );
+    await symlink(outsideSkillDirectory, path.join(skillsRoot, "leaked"));
+    await writeFileEnsuringDir(
+      path.join(skillsRoot, "real", "SKILL.md"),
+      skillFile("real"),
+    );
+
+    const commands = await discover(
+      fixture,
+      fixture.cwd,
+      nativeRoots({
+        skills: {
+          project: [declared(".agents/skills", { recursive: true })],
+        },
+      }),
+    );
+
+    expect(byName(commands, "real")).toBeDefined();
+    expect(byName(commands, "leaked")).toBeUndefined();
   });
 
   it("degrades to other roots when a root directory is unreadable", async () => {

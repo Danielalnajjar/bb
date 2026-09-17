@@ -310,6 +310,77 @@ async function walkMarkdownTree(args: WalkMarkdownTreeArgs): Promise<void> {
   }
 }
 
+interface WalkRecursiveSkillTreeArgs {
+  budget: ScanBudget;
+  currentPath: string;
+  depth: number;
+  matches: SkillFileMatch[];
+  root: CommandScanDirectoryRoot;
+  rootLinked: boolean;
+  visitedRealPaths: Set<string>;
+}
+
+/**
+ * Recursive skill homes support category folders (`frontend/button/SKILL.md`).
+ * User-origin skill-directory and SKILL.md file symlinks are followed the same
+ * way as the one-level `skill` shape, with a visited-realpath set so a cycle
+ * cannot escape. Project-origin inner symlinks stay skipped; a project root
+ * whose real path leaves `boundaryPath` is rejected before this walk.
+ *
+ * A directory that already contains SKILL.md is a skill package. Do not list
+ * its resource files — those trees (lock-managed installs, node_modules) would
+ * otherwise exhaust the per-root entry budget before sibling skills are seen.
+ */
+async function walkRecursiveSkillTree(
+  args: WalkRecursiveSkillTreeArgs,
+): Promise<void> {
+  if (args.depth > MAX_SCAN_DEPTH || args.budget.remainingEntries === 0) {
+    return;
+  }
+  const realPath = await fs.realpath(args.currentPath).catch(() => null);
+  if (realPath === null || args.visitedRealPaths.has(realPath)) {
+    return;
+  }
+  args.visitedRealPaths.add(realPath);
+
+  const entries = await readDirEntries(args.currentPath, args.budget);
+  if (entries === null) {
+    return;
+  }
+
+  for (const entry of entries) {
+    const entryPath = path.join(args.currentPath, entry.name);
+    if (
+      !(await isSkillDirectory({
+        entry,
+        entryPath,
+        root: args.root,
+      }))
+    ) {
+      continue;
+    }
+    if (await hasManifestMarker(args.root, entryPath)) {
+      continue;
+    }
+    const skillFilePath = path.join(entryPath, SKILL_FILE_NAME);
+    const skillFile = await statSkillFile(skillFilePath, args.root);
+    if (skillFile !== null) {
+      args.matches.push({
+        filePath: skillFilePath,
+        frontmatter: await parseFrontmatter(skillFilePath),
+        linked: args.rootLinked || entry.isSymbolicLink() || skillFile.linked,
+        name: entry.name,
+      });
+      continue;
+    }
+    await walkRecursiveSkillTree({
+      ...args,
+      currentPath: entryPath,
+      depth: args.depth + 1,
+    });
+  }
+}
+
 async function resolveRecursiveRootPath(
   root: CommandScanDirectoryRoot,
 ): Promise<string | null> {
@@ -333,30 +404,31 @@ async function scanRecursiveSkillRootFiles(
   root: CommandScanDirectoryRoot,
   budget: ScanBudget,
 ): Promise<SkillFileMatch[]> {
-  const rootPath = await resolveRecursiveRootPath(root);
-  if (rootPath === null) {
+  if ((await resolveRecursiveRootPath(root)) === null) {
     return [];
   }
-  const matchedFiles: string[] = [];
-  await walkMarkdownTree({
+  const matches: SkillFileMatch[] = [];
+  const rootLinked = await isSymbolicLinkPath(root.rootPath);
+  const rootSkillFilePath = path.join(root.rootPath, SKILL_FILE_NAME);
+  const rootSkillFile = await statSkillFile(rootSkillFilePath, root);
+  if (rootSkillFile !== null) {
+    matches.push({
+      filePath: rootSkillFilePath,
+      frontmatter: await parseFrontmatter(rootSkillFilePath),
+      linked: rootLinked || rootSkillFile.linked,
+      name: path.basename(root.rootPath),
+    });
+  }
+  await walkRecursiveSkillTree({
     budget,
-    currentPath: rootPath,
+    currentPath: root.rootPath,
     depth: 0,
-    matchedFiles,
-    matches: (entry) => entry.name === SKILL_FILE_NAME,
+    matches,
+    root,
+    rootLinked,
+    visitedRealPaths: new Set<string>(),
   });
-  const linked = await isSymbolicLinkPath(root.rootPath);
-  return Promise.all(
-    matchedFiles.map(async (physicalFilePath) => ({
-      filePath: path.join(
-        root.rootPath,
-        path.relative(rootPath, physicalFilePath),
-      ),
-      frontmatter: await parseFrontmatter(physicalFilePath),
-      linked,
-      name: path.basename(path.dirname(physicalFilePath)),
-    })),
-  );
+  return matches;
 }
 
 async function scanSingleSkillDirectoryFiles(
@@ -482,9 +554,13 @@ export async function discoverProviderCommands(
   args: DiscoverProviderCommandsArgs,
 ): Promise<HostProviderCommand[]> {
   const records: HostProviderCommand[] = [];
-  const budget = { remainingEntries: MAX_SCAN_ENTRY_COUNT };
   for (const root of args.roots) {
-    records.push(...(await scanRoot({ budget, root })));
+    records.push(
+      ...(await scanRoot({
+        budget: { remainingEntries: MAX_SCAN_ENTRY_COUNT },
+        root,
+      })),
+    );
   }
   return records;
 }
@@ -524,9 +600,11 @@ export async function discoverSkills(
   args: DiscoverSkillsArgs,
 ): Promise<DiscoveredSkill[]> {
   const records: DiscoveredSkill[] = [];
-  const budget = { remainingEntries: MAX_SCAN_ENTRY_COUNT };
   for (const root of args.roots) {
-    for (const match of await scanSkillFiles({ budget, root })) {
+    for (const match of await scanSkillFiles({
+      budget: { remainingEntries: MAX_SCAN_ENTRY_COUNT },
+      root,
+    })) {
       records.push(buildSkillRecord(root, match));
     }
   }

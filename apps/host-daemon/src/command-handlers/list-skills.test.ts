@@ -495,7 +495,7 @@ describe("discoverSkills marks the linked flag per root shape", () => {
     }
   });
 
-  it("skill-recursive: only the root being a symlink counts; nested links are not walked", async () => {
+  it("skill-recursive: user-origin nested skill-directory symlinks are followed", async () => {
     const plainRoot = path.join(tempRoot, "recursive");
     await writeSkill(
       path.join(plainRoot, "category", "nested", "SKILL.md"),
@@ -513,24 +513,34 @@ describe("discoverSkills marks the linked flag per root shape", () => {
     const linkedRoot = path.join(tempRoot, "recursive-linked");
     await symlink(plainRoot, linkedRoot, "dir");
 
-    for (const [rootPath, linked] of [
-      [plainRoot, false],
-      [linkedRoot, true],
-    ] as const) {
-      expect(
-        await discoverRoot({
-          ...USER_SKILL_ROOT,
-          shape: "skill-recursive",
-          rootPath,
-        }),
-      ).toEqual([
-        [
-          "nested",
-          linked,
-          path.join(rootPath, "category", "nested", "SKILL.md"),
-        ],
-      ]);
-    }
+    expect(
+      await discoverRoot({
+        ...USER_SKILL_ROOT,
+        shape: "skill-recursive",
+        rootPath: plainRoot,
+      }),
+    ).toEqual([
+      ["nested", false, path.join(plainRoot, "category", "nested", "SKILL.md")],
+      [
+        "linked-category",
+        true,
+        path.join(plainRoot, "linked-category", "SKILL.md"),
+      ],
+    ]);
+    expect(
+      await discoverRoot({
+        ...USER_SKILL_ROOT,
+        shape: "skill-recursive",
+        rootPath: linkedRoot,
+      }),
+    ).toEqual([
+      ["nested", true, path.join(linkedRoot, "category", "nested", "SKILL.md")],
+      [
+        "linked-category",
+        true,
+        path.join(linkedRoot, "linked-category", "SKILL.md"),
+      ],
+    ]);
   });
 
   it("skill: the root, the skill entry, or its SKILL.md being a symlink", async () => {
