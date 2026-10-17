@@ -2155,6 +2155,13 @@ export interface PluginMessageDirectiveRegistration {
    */
   id: string;
   component: ComponentType<PluginMessageDirectiveProps>;
+  /**
+   * Promote a completed tool result containing only this directive to an
+   * inline chat graphic. The value is the exact agent-tool name that returns
+   * the directive. Other tools and mixed text remain ordinary tool rows.
+   * Experimental: see docs/api_to_audit.md.
+   */
+  experimental_toolResultFrom?: string;
 }
 
 /**

@@ -151,6 +151,8 @@ import { isPluginSideChatSenderThread } from "@/lib/side-chat-plugin.js";
 import {
   buildMessageDirectiveRegistry,
   MessageDirectiveRegistryProvider,
+  useMessageDirectiveRegistry,
+  type MessageDirectiveRegistry,
 } from "@/components/ui/markdown-message-directives.js";
 import {
   buildCodeFenceRendererRegistry,
@@ -1728,6 +1730,20 @@ function SentThreadMessageRow({
   );
 }
 
+function inlineToolDirective(
+  row: Extract<TimelineViewWorkRow, { workKind: "tool" }>,
+  registry: MessageDirectiveRegistry,
+): string | null {
+  if (row.status !== "completed" || row.output.length > 2_064) return null;
+  const result = row.output.trim();
+  const name = /^::([a-z][a-z0-9-]*)\{[^\r\n]{1,2048}\}$/.exec(result)?.[1];
+  const registration = name === undefined ? undefined : registry.get(name);
+  return registration?.status === "ok" &&
+    registration.slot.experimental_toolResultFrom === row.toolName
+    ? result
+    : null;
+}
+
 function TimelineRowView({
   activeLatestBundleId,
   compactActivityIntents,
@@ -1747,7 +1763,13 @@ function TimelineRowView({
   const pluginRendererSlot = usePluginTimelineRenderer(
     row.kind === "work" ? row : null,
   );
+  const directiveRegistry = useMessageDirectiveRegistry();
   const staticLeadingIconUrl = useLeadingIconUrlForRow(row);
+
+  if (row.kind === "work" && row.workKind === "tool" && directiveRegistry !== null) {
+    const result = inlineToolDirective(row, directiveRegistry);
+    if (result !== null) return <InlineToolResult row={row} text={result} />;
+  }
 
   if (row.kind === "conversation") {
     return (
@@ -1836,6 +1858,35 @@ function TimelineRowView({
       title={titleState.title}
       horizontalPadding={horizontalPadding}
       compactActivityIntents={compactActivityIntents}
+    />
+  );
+}
+
+function InlineToolResult({
+  row,
+  text,
+}: {
+  row: Extract<TimelineViewWorkRow, { workKind: "tool" }>;
+  text: string;
+}) {
+  const context = useTimelineRendererStaticContext();
+  return (
+    <ConversationMessageContent
+      attachments={null}
+      id={row.id}
+      onOpenLink={context.onOpenLink}
+      onOpenLocalFileLink={context.onOpenLocalFileLink}
+      projectId={context.projectId}
+      resolveUserAttachmentImageSrc={context.resolveUserAttachmentImageSrc}
+      role="assistant"
+      showActions={false}
+      mobileActionDisplay="overflow"
+      streaming={false}
+      text={text}
+      timestamp={row.startedAt}
+      threadId={row.threadId}
+      turnId={row.turnId}
+      workspaceRootPath={context.workspaceRootPath}
     />
   );
 }
@@ -2221,9 +2272,27 @@ function ThreadTimelineRowsComponent(props: ThreadTimelineRowsProps) {
 function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
   const getViewRows = useTimelineViewRowsCache();
   const [windowingMeasurements] = useState(() => new Map<string, number>());
+  const messageDirectiveSlots = useSyncExternalStore(
+    subscribePluginSlots,
+    () => getPluginSlotSnapshot().messageDirectives,
+    () => EMPTY_PLUGIN_SLOT_SNAPSHOT.messageDirectives,
+  );
+  const messageDirectiveRegistry = useMemo(
+    () => buildMessageDirectiveRegistry(messageDirectiveSlots),
+    [messageDirectiveSlots],
+  );
+  const hasInlineToolDirective = useMemo(
+    () => [...messageDirectiveRegistry.values()].some(
+      (entry) => entry.status === "ok" && entry.slot.experimental_toolResultFrom !== undefined,
+    ),
+    [messageDirectiveRegistry],
+  );
   const rows = useMemo(
-    () => getViewRows(props.timelineRows),
-    [getViewRows, props.timelineRows],
+    () => getViewRows(props.timelineRows, hasInlineToolDirective ? {
+      standaloneWorkRow: (row) => row.workKind === "tool" &&
+        inlineToolDirective(row, messageDirectiveRegistry) !== null,
+    } : undefined),
+    [getViewRows, hasInlineToolDirective, messageDirectiveRegistry, props.timelineRows],
   );
   const heightSnapRevision = timelineHeightSnapRevision(props.timelineRows);
   const latestActionableAssistantMessageId = useMemo(
@@ -2277,11 +2346,6 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
   );
   const projectId = props.projectId;
   const senderThreadMetadataById = useSenderThreadMetadataById();
-  const messageDirectiveSlots = useSyncExternalStore(
-    subscribePluginSlots,
-    () => getPluginSlotSnapshot().messageDirectives,
-    () => EMPTY_PLUGIN_SLOT_SNAPSHOT.messageDirectives,
-  );
   const codeFenceRendererSlots = useSyncExternalStore(
     subscribePluginSlots,
     () => getPluginSlotSnapshot().codeFenceRenderers,
@@ -2291,10 +2355,6 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
     subscribePluginSlots,
     () => getPluginSlotSnapshot().messageActions,
     () => EMPTY_PLUGIN_SLOT_SNAPSHOT.messageActions,
-  );
-  const messageDirectiveRegistry = useMemo(
-    () => buildMessageDirectiveRegistry(messageDirectiveSlots),
-    [messageDirectiveSlots],
   );
   const codeFenceRendererRegistry = useMemo(
     () => buildCodeFenceRendererRegistry(codeFenceRendererSlots),

@@ -14,6 +14,21 @@ question.
 [provider-bridge-protocol.md](provider-bridge-protocol.md). An entry without
 a "Docs:" line has no owning doc, so it keeps the essential contract itself.
 
+## `PluginMessageDirectiveRegistration.experimental_toolResultFrom`
+
+A directive can name one exact agent tool whose completed result is promoted
+to an inline chat item when the entire output is a single registered directive.
+The same message-directive renderer, crash boundary, and thread context serve
+assistant messages and promoted tool results. Other tools and outputs with
+surrounding text stay ordinary tool rows. Core uses this path to show a
+tool-produced visual reply without asking the agent to repeat a directive.
+
+Docs: `frontend-renderer-slots.md`.
+
+Before stabilization, audit tool-output truncation, nested/compacted timeline
+rows, plugin disable/uninstall fallback, collisions between directive ids,
+and whether a tool should own more than one promoted visual per result.
+
 ## Composer popups
 
 `ComposerCustomization.experimental_popups` registers `{ id, label, component }`

@@ -935,6 +935,7 @@ export function createTimelineViewRowsCache(): TimelineViewRowsCache {
 function toTimelineViewWorkRow(
   row: TimelineWorkRow,
   cache: TimelineViewRowsCache,
+  standaloneWorkRow?: BuildTimelineViewRowsOptions["standaloneWorkRow"],
 ): TimelineViewWorkRow {
   if (row.workKind !== "delegation") {
     return row;
@@ -946,20 +947,21 @@ function toTimelineViewWorkRow(
     childRows:
       row.childRows === null
         ? null
-        : buildTimelineViewRows(row.childRows, { cache, closedScope }),
+        : buildTimelineViewRows(row.childRows, { cache, closedScope, standaloneWorkRow }),
   };
 }
 
 function toTimelineViewRow(
   row: TimelineRow,
   cache: TimelineViewRowsCache,
+  standaloneWorkRow?: BuildTimelineViewRowsOptions["standaloneWorkRow"],
 ): ThreadTimelineViewRow {
   switch (row.kind) {
     case "conversation":
     case "system":
       return row;
     case "work":
-      return toTimelineViewWorkRow(row, cache);
+      return toTimelineViewWorkRow(row, cache, standaloneWorkRow);
     case "turn":
       return {
         ...row,
@@ -967,6 +969,7 @@ function toTimelineViewRow(
           ? buildTimelineViewRows(row.children, {
               cache,
               closedScope: true,
+              standaloneWorkRow,
             })
           : null,
       };
@@ -978,23 +981,30 @@ function toTimelineViewRow(
 export interface BuildTimelineViewRowsOptions {
   closedScope?: boolean;
   cache?: TimelineViewRowsCache;
+  standaloneWorkRow?: (row: TimelineViewWorkRow) => boolean;
 }
 
 export function buildTimelineViewRows(
   rows: readonly TimelineRow[],
   options: BuildTimelineViewRowsOptions = {},
 ): ThreadTimelineViewRow[] {
-  const cache = options.cache;
+  const cache = options.standaloneWorkRow ? undefined : options.cache;
   if (cache) {
     const cached = cache.get(rows);
     if (cached) return cached;
   }
   const childCache = cache ?? createTimelineViewRowsCache();
-  const viewRows = rows.map((row) => toTimelineViewRow(row, childCache));
+  const viewRows = rows.map((row) => toTimelineViewRow(row, childCache, options.standaloneWorkRow));
   const result: ThreadTimelineViewRow[] = [];
   let openStep: TimelineWorkSummaryChild[] = [];
 
   for (const row of viewRows) {
+    if (row.kind === "work" && options.standaloneWorkRow?.(row)) {
+      result.push(...flushOpenStepAsBundles(openStep));
+      openStep = [];
+      result.push(row);
+      continue;
+    }
     if (isSummarizableActivityRow(row)) {
       openStep.push(row);
       continue;

@@ -41,8 +41,13 @@ Original }`. `experimental_fullFileContents` is either
 - `messageDirective` → `{ attributes, source, message,
 openWorkspaceFile }` — register a leaf
   assistant-message directive. Registration:
-  `{ id, component }` where `id` is lowercase kebab-case beginning with a
+  `{ id, component, experimental_toolResultFrom? }` where `id` is lowercase kebab-case beginning with a
   letter (e.g. `inline-vis` matches `::inline-vis{file="demo.html"}`).
+  `experimental_toolResultFrom` names one agent tool. When that tool completes
+  with exactly one directive and no other output, bb displays it as an inline
+  chat item in place of the tool row. Other tools, partial results, and mixed
+  output keep the normal tool row. This is opt-in because tool output is not
+  otherwise trusted as assistant-authored message content.
   Props: `attributes` is a `Readonly<Record<string, string>>` of untrusted
   parsed key/values (validate your own fields); `source` is the original
   directive text (useful for diagnostics); `message` is

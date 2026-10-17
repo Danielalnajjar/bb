@@ -270,6 +270,7 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "Add live components to an agent's reply. With this, a plugin can:",
         bullets: [
           "Let an agent write `::name` to place your component in its message",
+          "Optionally show a render tool's directive result automatically as an inline chat item",
           "Show charts, task lists, or previews inline in the conversation",
           "Open workspace files when someone clicks the embed",
         ],

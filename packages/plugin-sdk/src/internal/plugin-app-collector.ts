@@ -962,6 +962,15 @@ export function collectPluginAppRegistrations(
         collected.messageDirectives.push({
           id,
           component: requireComponent(kind, registration.component),
+          ...(registration.experimental_toolResultFrom === undefined
+            ? {}
+            : {
+                experimental_toolResultFrom: requireNonEmptyString(
+                  kind,
+                  "experimental_toolResultFrom",
+                  registration.experimental_toolResultFrom,
+                ),
+              }),
         });
       },
       experimental_codeFenceRenderer(registration) {

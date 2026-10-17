@@ -32,6 +32,7 @@ import { ThreadTimelineRows } from "@/components/thread/timeline/ThreadTimelineR
 import {
   conversationRow,
   delegationRow,
+  toolRow,
 } from "@/test/fixtures/thread-timeline-rows";
 import {
   resetPluginSlotStoreForTest,
@@ -750,6 +751,41 @@ describe("ConversationMessageContent assistant directives", () => {
 });
 
 describe("ThreadTimelineRows message directive subscription", () => {
+  it("promotes only an opted-in tool's exact directive output into chat", () => {
+    setPluginSlotRegistrations(
+      "demo",
+      emptyRegistrationSet({
+        messageDirectives: [{
+          id: "inline-vis",
+          component: InlineVis,
+          experimental_toolResultFrom: "render_html",
+        }],
+      }),
+    );
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <MemoryRouter>
+          <ThreadTimelineRows
+            threadId="thr_main"
+            projectId="proj_main"
+            threadRuntimeDisplayStatus="idle"
+            workspaceRootPath={undefined}
+            timelineRows={[
+              toolRow({ id: "tool_vis", threadId: "thr_main", toolName: "render_html", output: '::inline-vis{file="chart.html"}' }),
+              toolRow({ id: "tool_other", threadId: "thr_main", toolName: "web_fetch", output: '::inline-vis{file="untrusted.html"}' }),
+              toolRow({ id: "tool_mixed", threadId: "thr_main", toolName: "render_html", output: 'Note\n::inline-vis{file="mixed.html"}' }),
+            ]}
+          />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    const graphic = screen.getByTestId("inline-vis");
+    expect(graphic.getAttribute("data-file")).toBe("chart.html");
+    expect(graphic.getAttribute("data-thread-id")).toBe("thr_main");
+    expect(screen.getAllByTestId("inline-vis")).toHaveLength(1);
+    expect(screen.getByTitle("Ran 2 tools")).toBeTruthy();
+  });
+
   it("mounts directives in assistant and delegation output from the slot store", () => {
     setPluginSlotRegistrations(
       "demo",
