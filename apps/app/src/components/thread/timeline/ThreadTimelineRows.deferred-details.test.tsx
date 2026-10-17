@@ -4,15 +4,19 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TimelineRow } from "@bb/server-contract";
+import type { PluginMessageDirectiveProps } from "@get-bb/plugin-sdk";
 import {
   commandRow,
   conversationRow,
   delegationRow,
   systemRow,
+  toolRow,
   turnRow,
 } from "@/test/fixtures/thread-timeline-rows";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
 import { sdk } from "@/lib/sdk";
+import { resetPluginSlotStoreForTest, setPluginSlotRegistrations } from "@/lib/plugin-slots";
+import { makePluginRegistrationSet } from "@/test/fixtures/plugins";
 import { ThreadTimelineRows } from "./ThreadTimelineRows";
 
 vi.mock("@/lib/sdk", () => ({
@@ -50,9 +54,53 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  resetPluginSlotStoreForTest();
 });
 
 describe("deferred timeline details", () => {
+  it("keeps a published graphic inline when historical turn details load", async () => {
+    setPluginSlotRegistrations("graphics", makePluginRegistrationSet({
+      messageDirectives: [{
+        id: "inline-graphic",
+        component: ({ attributes }: PluginMessageDirectiveProps) => (
+          <div>graphic:{attributes.file}</div>
+        ),
+        experimental_toolResultFrom: "render_html",
+      }],
+    }));
+    timelineTurnSummaryDetails.mockResolvedValue({
+      olderCursor: null,
+      rows: [
+        toolRow({
+          id: "graphic-tool",
+          threadId: "thr_main",
+          turnId: "turn_1",
+          toolName: "render_html",
+          output: '::inline-graphic{file="chart.html"}',
+          sourceSeqStart: 11,
+          sourceSeqEnd: 11,
+        }),
+        toolRow({
+          id: "ordinary-tool",
+          threadId: "thr_main",
+          turnId: "turn_1",
+          toolName: "web_fetch",
+          output: "Fetched supporting data.",
+          sourceSeqStart: 12,
+          sourceSeqEnd: 12,
+        }),
+      ],
+    });
+
+    renderExpandedRow(turnRow({
+      sourceSeqEnd: 20,
+      threadId: "thr_main",
+      turnId: "turn_1",
+    }));
+
+    expect(await screen.findByText("graphic:chart.html")).toBeTruthy();
+  });
+
   it("loads a settled delegation's children by call when it is expanded", async () => {
     const deferred = delegationRow({
       callId: "agent-call",

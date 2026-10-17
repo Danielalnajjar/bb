@@ -2287,12 +2287,22 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
     ),
     [messageDirectiveRegistry],
   );
+  const standaloneWorkRow = useMemo<BuildTimelineViewRowsOptions["standaloneWorkRow"]>(
+    () => hasInlineToolDirective
+      ? (row) => row.workKind === "tool" &&
+          inlineToolDirective(row, messageDirectiveRegistry) !== null
+      : undefined,
+    [hasInlineToolDirective, messageDirectiveRegistry],
+  );
+  const getInlineViewRows = useCallback<GetTimelineViewRows>(
+    (rawRows, options) => getViewRows(rawRows, standaloneWorkRow
+      ? { ...options, standaloneWorkRow }
+      : options),
+    [getViewRows, standaloneWorkRow],
+  );
   const rows = useMemo(
-    () => getViewRows(props.timelineRows, hasInlineToolDirective ? {
-      standaloneWorkRow: (row) => row.workKind === "tool" &&
-        inlineToolDirective(row, messageDirectiveRegistry) !== null,
-    } : undefined),
-    [getViewRows, hasInlineToolDirective, messageDirectiveRegistry, props.timelineRows],
+    () => getInlineViewRows(props.timelineRows),
+    [getInlineViewRows, props.timelineRows],
   );
   const heightSnapRevision = timelineHeightSnapRevision(props.timelineRows);
   const latestActionableAssistantMessageId = useMemo(
@@ -2447,7 +2457,7 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
   const staticContextValue = useMemo<TimelineRendererStaticContextValue>(
     () => ({
       canSpawnChild: props.canSpawnChild ?? false,
-      getViewRows,
+      getViewRows: getInlineViewRows,
       onForkMessage: props.onForkMessage,
       onEditMessage: props.onEditMessage,
       inlineMessageEditor: props.inlineMessageEditor,
@@ -2474,7 +2484,7 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
     }),
     [
       props.canSpawnChild,
-      getViewRows,
+      getInlineViewRows,
       props.onForkMessage,
       props.onEditMessage,
       props.inlineMessageEditor,
