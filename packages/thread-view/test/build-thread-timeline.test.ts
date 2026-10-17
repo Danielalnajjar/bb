@@ -56,6 +56,7 @@ interface FileChangeItemEventArgs {
 }
 
 interface ToolCallItemEventArgs {
+  server?: string;
   parentToolCallId?: string;
   statusLabels?: { pending: string; completed: string };
   itemId?: string;
@@ -296,6 +297,7 @@ function fileChangeItemEvent({
 }
 
 function toolCallItemEvent({
+  server,
   parentToolCallId,
   statusLabels,
   itemId = "tool-call-1",
@@ -316,6 +318,7 @@ function toolCallItemEvent({
         type: "toolCall",
         id: itemId,
         tool,
+        ...(server ? { server } : {}),
         ...(toolArgs ? { arguments: toolArgs } : {}),
         ...(parentToolCallId ? { parentToolCallId } : {}),
         ...(statusLabels ? { statusLabels } : {}),
@@ -834,6 +837,34 @@ function fileChangeRowIdByPath(
 }
 
 describe("buildThreadTimelineFromEvents", () => {
+  it("keeps a BB directive result outside collapsed history without loading nested details", () => {
+    const directive = '::inline-graphics{id="saved"}';
+    const timeline = buildThreadTimelineFromEvents({
+      acceptedClientRequestContext: EMPTY_ACCEPTED_CLIENT_REQUEST_CONTEXT,
+      contextWindowEvents: [],
+      events: [
+        turnStartedEvent({ seq: 1 }),
+        toolCallItemEvent({ seq: 2, itemId: "ordinary", tool: "read", result: "Read data", type: "item/completed" }),
+        toolCallItemEvent({ seq: 3, itemId: "graphic", tool: "render_html", server: "bb", result: directive, type: "item/completed" }),
+        turnCompletedEvent({ seq: 4 }),
+      ],
+      options: {
+        completedTurnDisplay: "collapse",
+        includeNestedRows: false,
+        includeDiagnosticOperations: false,
+        summarizeShellCommands: true,
+        isLatestPage: true,
+        threadStatus: "idle",
+        threadName: "",
+        workspaceRoot: null,
+      },
+    });
+    expect(timeline.rows.filter((row) => row.kind === "turn"))
+      .toMatchObject([{ children: null }]);
+    expect(timeline.rows.filter((row) => row.kind === "work"))
+      .toMatchObject([{ workKind: "tool", toolName: "bb:render_html", output: directive }]);
+  });
+
   it("renders one turn when daemon retry history contains duplicate turn starts", () => {
     const rows = buildTimelineRows([
       turnStartedEvent({ seq: 1 }),

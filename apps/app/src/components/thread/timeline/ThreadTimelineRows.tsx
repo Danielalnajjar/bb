@@ -26,6 +26,7 @@ import {
   buildTimelineRowTitle,
   buildTimelineViewRows,
   createTimelineViewRowsCache,
+  getInlineToolDirectiveCandidate,
   findActiveLatestBundleId,
   parseSentThreadMessage,
   workRowGlyph,
@@ -1734,13 +1735,12 @@ function inlineToolDirective(
   row: Extract<TimelineViewWorkRow, { workKind: "tool" }>,
   registry: MessageDirectiveRegistry,
 ): string | null {
-  if (row.status !== "completed" || row.output.length > 2_064) return null;
-  const result = row.output.trim();
-  const name = /^::([a-z][a-z0-9-]*)\{[^\r\n]{1,2048}\}$/.exec(result)?.[1];
-  const registration = name === undefined ? undefined : registry.get(name);
+  const candidate = getInlineToolDirectiveCandidate(row);
+  if (candidate === null) return null;
+  const registration = registry.get(candidate.name);
   return registration?.status === "ok" &&
-    registration.slot.experimental_toolResultFrom === row.toolName
-    ? result
+    `bb:${registration.slot.experimental_toolResultFrom}` === row.toolName
+    ? candidate.text
     : null;
 }
 

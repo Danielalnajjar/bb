@@ -925,7 +925,11 @@ function flushOpenStepAsBundles(
 
 type TimelineViewRowsCache = WeakMap<
   readonly TimelineRow[],
-  ThreadTimelineViewRow[]
+  {
+    rows: ThreadTimelineViewRow[];
+    standaloneWorkRow: BuildTimelineViewRowsOptions["standaloneWorkRow"];
+    closedScope: boolean;
+  }
 >;
 
 export function createTimelineViewRowsCache(): TimelineViewRowsCache {
@@ -988,10 +992,11 @@ export function buildTimelineViewRows(
   rows: readonly TimelineRow[],
   options: BuildTimelineViewRowsOptions = {},
 ): ThreadTimelineViewRow[] {
-  const cache = options.standaloneWorkRow ? undefined : options.cache;
+  const cache = options.cache;
   if (cache) {
     const cached = cache.get(rows);
-    if (cached) return cached;
+    if (cached && cached.standaloneWorkRow === options.standaloneWorkRow &&
+      cached.closedScope === (options.closedScope ?? false)) return cached.rows;
   }
   const childCache = cache ?? createTimelineViewRowsCache();
   const viewRows = rows.map((row) => toTimelineViewRow(row, childCache, options.standaloneWorkRow));
@@ -1025,7 +1030,11 @@ export function buildTimelineViewRows(
     result.push(...flushOpenStepAsBundles(openStep));
   }
   if (cache) {
-    cache.set(rows, result);
+    cache.set(rows, {
+      rows: result,
+      standaloneWorkRow: options.standaloneWorkRow,
+      closedScope: options.closedScope ?? false,
+    });
   }
   return result;
 }

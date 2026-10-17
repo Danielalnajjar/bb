@@ -771,9 +771,9 @@ describe("ThreadTimelineRows message directive subscription", () => {
             threadRuntimeDisplayStatus="idle"
             workspaceRootPath={undefined}
             timelineRows={[
-              toolRow({ id: "tool_vis", threadId: "thr_main", toolName: "render_html", output: '::inline-vis{file="chart.html"}' }),
+              toolRow({ id: "tool_vis", threadId: "thr_main", toolName: "bb:render_html", output: '::inline-vis{file="chart.html"}' }),
               toolRow({ id: "tool_other", threadId: "thr_main", toolName: "web_fetch", output: '::inline-vis{file="untrusted.html"}' }),
-              toolRow({ id: "tool_mixed", threadId: "thr_main", toolName: "render_html", output: 'Note\n::inline-vis{file="mixed.html"}' }),
+              toolRow({ id: "tool_mixed", threadId: "thr_main", toolName: "bb:render_html", output: 'Note\n::inline-vis{file="mixed.html"}' }),
             ]}
           />
         </MemoryRouter>

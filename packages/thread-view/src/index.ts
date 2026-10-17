@@ -1,4 +1,5 @@
 export { formatThreadTimelineText } from "./format-timeline-text.js";
+export { getInlineToolDirectiveCandidate } from "./inline-tool-directive.js";
 export { parseAgentMessageEnvelope } from "./agent-message-envelope.js";
 export type { ThreadTimelineTextFormat } from "./format-timeline-text.js";
 export { assertNever } from "./assert-never.js";

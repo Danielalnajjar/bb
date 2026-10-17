@@ -1,5 +1,6 @@
 import type { EventProjectionMessage } from "./event-projection-types.js";
 import { parseSentThreadMessage } from "./tool-call-parsing.js";
+import { getInlineToolDirectiveCandidate } from "./inline-tool-directive.js";
 
 export function isTimelineTerminalMessage(
   message: EventProjectionMessage,
@@ -28,6 +29,9 @@ export function isTimelineUngroupableMessage(
   }
   if (message.kind === "command") {
     return parseSentThreadMessage(message) !== null;
+  }
+  if (message.kind === "tool-call") {
+    return getInlineToolDirectiveCandidate(message) !== null;
   }
   return false;
 }

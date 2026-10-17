@@ -1,5 +1,6 @@
 import type { TimelineRow, TimelineRowStatus } from "@bb/server-contract";
 import { sliceUtf16Head } from "@bb/text-utils";
+import { getInlineToolDirectiveCandidate } from "@bb/thread-view";
 
 export const TIMELINE_DEFERRED_CONTENT_MIN_CHARS = 1_000;
 
@@ -51,6 +52,7 @@ function deferRowContent(row: TimelineRow): TimelineRow {
         };
       }
       case "tool": {
+        if (getInlineToolDirectiveCandidate(row) !== null) return row;
         if (row.output.length <= TIMELINE_DEFERRED_CONTENT_MIN_CHARS) {
           return row;
         }

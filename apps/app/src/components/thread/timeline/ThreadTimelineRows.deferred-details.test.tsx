@@ -75,7 +75,7 @@ describe("deferred timeline details", () => {
           id: "graphic-tool",
           threadId: "thr_main",
           turnId: "turn_1",
-          toolName: "render_html",
+          toolName: "bb:render_html",
           output: '::inline-graphic{file="chart.html"}',
           sourceSeqStart: 11,
           sourceSeqEnd: 11,

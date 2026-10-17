@@ -13,6 +13,7 @@ import type {
 import {
   buildTimelineWorkSummaryLabel,
   buildTimelineViewRows,
+  createTimelineViewRowsCache,
   type ThreadTimelineViewRow,
   type TimelineBundleSummaryRow,
   type TimelineStepSummaryRow,
@@ -266,6 +267,22 @@ function expectDelegationWorkRow(
 }
 
 describe("buildTimelineViewRows", () => {
+  it("reuses graphic-aware projections and invalidates them when the directive predicate changes", () => {
+    const cache = createTimelineViewRowsCache();
+    const rows = [toolRow({ id: "graphic" }), toolRow({ id: "ordinary" })];
+    const standaloneWorkRow = (row: ThreadTimelineViewRow) => row.id === "graphic";
+    const graphics = buildTimelineViewRows(rows, { cache, standaloneWorkRow });
+    expect(graphics.map((row) => row.id)).toEqual(["graphic", "ordinary"]);
+    expect(buildTimelineViewRows(rows, { cache, standaloneWorkRow })).toBe(graphics);
+
+    const grouped = buildTimelineViewRows(rows, { cache });
+    expect(grouped).not.toBe(graphics);
+    expect(grouped).toHaveLength(1);
+    expect(grouped[0]?.kind).toBe("bundle-summary");
+    expect(buildTimelineViewRows(rows, { cache })).toBe(grouped);
+    expect(buildTimelineViewRows(rows, { cache, standaloneWorkRow })).toEqual(graphics);
+  });
+
   it("keeps a single completed command work run visible as a leaf", () => {
     const rows = buildTimelineViewRows([commandRow()]);
 
