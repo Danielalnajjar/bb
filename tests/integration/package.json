@@ -20,8 +20,8 @@
     "@bb/server": "workspace:*",
     "@bb/server-contract": "workspace:*",
     "@bb/test-helpers": "workspace:*",
-    "@hono/node-server": "^1.19.11",
-    "drizzle-orm": "^0.38.4",
+    "@hono/node-server": "^1.19.15",
+    "drizzle-orm": "^0.45.2",
     "ws": "^8.19.0"
   },
   "devDependencies": {
@@ -30,6 +30,6 @@
     "@types/ws": "^8.18.1",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
     "typescript-7": "npm:typescript@^7.0.2",
-    "vitest": "^4.1.1"
+    "vitest": "^4.1.12"
   }
 }

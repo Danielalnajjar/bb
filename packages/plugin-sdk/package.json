@@ -110,7 +110,7 @@
     "better-sqlite3": "12.10.0",
     "cron-parser": "^5.5.0",
     "esbuild": "^0.28.0",
-    "hono": "4.11.9",
+    "hono": "4.13.11",
     "jsdom": "^29.0.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
@@ -118,7 +118,7 @@
     "rollup-plugin-dts": "^6.4.1",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
     "typescript-7": "npm:typescript@^7.0.2",
-    "vitest": "^4.1.1",
+    "vitest": "^4.1.12",
     "zod": "^4.3.6"
   },
   "peerDependencies": {

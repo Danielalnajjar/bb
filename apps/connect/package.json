@@ -14,7 +14,7 @@
   "dependencies": {
     "@bb/connect-db": "workspace:*",
     "@bb/tunnel-contract": "workspace:*",
-    "drizzle-orm": "^0.38.0"
+    "drizzle-orm": "^0.45.2"
   },
   "devDependencies": {
     "@bb/tsconfig": "workspace:*",

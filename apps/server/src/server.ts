@@ -531,7 +531,7 @@ export function createApp(
           false,
         );
       }
-      const terminalId = context.req.param("terminalId");
+      const { terminalId } = context.req.param<"/ws/terminals/:terminalId">();
       const query = terminalWebSocketQuerySchema.safeParse({
         sinceSeq: context.req.query("sinceSeq"),
       });

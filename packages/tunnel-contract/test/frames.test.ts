@@ -233,9 +233,7 @@ describe("chunkBody", () => {
       total.set(chunk.data, offset);
       offset += chunk.data.length;
     }
-    // Native memcmp — element-wise toEqual over ~2 MiB of numbers blows the
-    // test timeout on slower CI runners.
-    expect(Buffer.compare(Buffer.from(total), Buffer.from(data))).toBe(0);
+    expect(total.every((byte, index) => byte === data[index])).toBe(true);
   });
 
   it("yields nothing for an empty body", () => {
