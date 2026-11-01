@@ -6,6 +6,7 @@ import {
   parseDesktopVersionFeed,
 } from "../src/desktop-update-check.js";
 import { DESKTOP_UPDATE_ACTIVE_MIN_INTERVAL_MS } from "../src/desktop-update-scheduler.js";
+import { resolveDesktopUpdateSupport } from "../src/desktop-update-provider.js";
 
 const checkedAt = "2026-05-21T00:00:00.000Z";
 
@@ -186,6 +187,54 @@ describe("desktop update feed parsing", () => {
 });
 
 describe("desktop update service", () => {
+  it.each(["", "prompt-suggestions"])(
+    "reports official version-feed updates only for stock packaged builds (custom: %s)",
+    async (customBuild) => {
+      const support = resolveDesktopUpdateSupport({
+        canReplaceAppImage: () => true,
+        customBuild,
+        env: { BB_DESKTOP_VERSION_CHECK: "1" },
+        platform: "macos",
+      });
+      const fetchImpl = vi.fn<typeof fetch>(async () =>
+        createFeedResponse("0.0.2"),
+      );
+      const service = createDesktopUpdateService({
+        channel: "latest",
+        currentVersion: "0.0.1",
+        enabled: support.versionCheck,
+        feedUrl: "https://example.test/desktop-version.json",
+        fetchImpl,
+        logger: { warn() {} },
+        now: () => Date.parse(checkedAt),
+        platform: "macos",
+      });
+
+      service.start();
+      try {
+        await service.checkForUpdates();
+        await service.checkAfterActive();
+
+        if (customBuild) {
+          expect(fetchImpl).not.toHaveBeenCalled();
+          expect(service.getInfo()).toMatchObject({
+            lastCheckedAt: null,
+            latestVersion: null,
+            updateAvailable: false,
+          });
+        } else {
+          expect(fetchImpl).toHaveBeenCalled();
+          expect(service.getInfo()).toMatchObject({
+            latestVersion: "0.0.2",
+            updateAvailable: true,
+          });
+        }
+      } finally {
+        service.stop();
+      }
+    },
+  );
+
   it("preserves prior version state after a transient network failure", async () => {
     let fetchCount = 0;
     let nowMs = Date.parse(checkedAt);

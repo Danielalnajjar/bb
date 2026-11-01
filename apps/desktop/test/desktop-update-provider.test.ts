@@ -23,9 +23,28 @@ const alwaysReplaceable = () => true;
 const neverReplaceable = () => false;
 
 describe("desktop update support", () => {
+  it.each(["macos", "windows", "linux"] as const)(
+    "disables official binary and version-feed updates for custom %s builds",
+    (platform) => {
+      expect(
+        resolveDesktopUpdateSupport({
+          canReplaceAppImage: alwaysReplaceable,
+          customBuild: "prompt-suggestions",
+          env: {
+            APPIMAGE: APP_IMAGE_PATH,
+            BB_DESKTOP_AUTO_UPDATE: "1",
+            BB_DESKTOP_VERSION_CHECK: "1",
+          },
+          platform,
+        }),
+      ).toEqual({ autoUpdate: false, versionCheck: false });
+    },
+  );
+
   it("enables both update paths on macOS", () => {
     expect(
       resolveDesktopUpdateSupport({
+        customBuild: "",
         canReplaceAppImage: neverReplaceable,
         env: {},
         platform: "macos",
@@ -36,6 +55,7 @@ describe("desktop update support", () => {
   it("checks for and installs updates on Windows", () => {
     expect(
       resolveDesktopUpdateSupport({
+        customBuild: "",
         canReplaceAppImage: alwaysReplaceable,
         env: { APPIMAGE: APP_IMAGE_PATH },
         platform: "windows",
@@ -46,6 +66,7 @@ describe("desktop update support", () => {
   it("installs updates on Linux only inside an AppImage", () => {
     expect(
       resolveDesktopUpdateSupport({
+        customBuild: "",
         canReplaceAppImage: alwaysReplaceable,
         env: { APPIMAGE: APP_IMAGE_PATH },
         platform: "linux",
@@ -53,6 +74,7 @@ describe("desktop update support", () => {
     ).toEqual({ autoUpdate: true, versionCheck: true });
     expect(
       resolveDesktopUpdateSupport({
+        customBuild: "",
         canReplaceAppImage: alwaysReplaceable,
         env: {},
         platform: "linux",
@@ -60,6 +82,7 @@ describe("desktop update support", () => {
     ).toEqual({ autoUpdate: false, versionCheck: true });
     expect(
       resolveDesktopUpdateSupport({
+        customBuild: "",
         canReplaceAppImage: alwaysReplaceable,
         env: { APPIMAGE: "  " },
         platform: "linux",
@@ -72,6 +95,7 @@ describe("desktop update support", () => {
 
     expect(
       resolveDesktopUpdateSupport({
+        customBuild: "",
         canReplaceAppImage: (path) => {
           checked.push(path);
           return false;
@@ -87,6 +111,7 @@ describe("desktop update support", () => {
     let consulted = false;
 
     resolveDesktopUpdateSupport({
+      customBuild: "",
       canReplaceAppImage: () => {
         consulted = true;
         return true;

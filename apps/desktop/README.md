@@ -367,14 +367,21 @@ The native About panel is populated too, minus the age, since Electron takes
 those options once at startup. `scripts/build.mjs` bakes the build-time half of
 the facts into the bundles:
 
-| Variable                | Default when unset                                    |
-| ----------------------- | ----------------------------------------------------- |
-| `BB_DESKTOP_COMMIT`     | `GITHUB_SHA`, else `git rev-parse HEAD`, else unknown |
-| `BB_DESKTOP_BUILD_DATE` | The build's own timestamp, ISO 8601                   |
+| Variable                  | Default when unset                                    |
+| ------------------------- | ----------------------------------------------------- |
+| `BB_DESKTOP_COMMIT`       | `GITHUB_SHA`, else `git rev-parse HEAD`, else unknown |
+| `BB_DESKTOP_BUILD_DATE`   | The build's own timestamp, ISO 8601                   |
+| `BB_DESKTOP_CUSTOM_BUILD` | Empty (official update behavior)                      |
 
 The plugin SDK version is read from `packages/plugin-sdk/package.json` at build
 time. A checkout with no git metadata reports `Commit: unknown` rather than
 failing the build.
+
+For a maintenance-owned distribution, set `BB_DESKTOP_CUSTOM_BUILD` to its
+identifier (for example, `prompt-suggestions`) at build time. The marker is
+compiled into the bundles, included in Turbo's build cache identity, and shown
+in both About surfaces alongside the existing source commit. It does not
+replace or change that commit.
 
 ## macOS signing + notarization
 
@@ -411,6 +418,14 @@ JSON feed can show "update available" even when CI has published metadata only,
 while the Electron updater only flips the toast to "ready to install" after a
 signed update has actually downloaded. Local dev builds skip Electron auto-update
 unless `BB_DESKTOP_AUTO_UPDATE=1` is set.
+
+Custom builds marked with `BB_DESKTOP_CUSTOM_BUILD` disable both official
+binary download/installation and official version-feed update prompts,
+including explicit update checks. About reports that updates are
+maintenance-managed. Runtime environment overrides cannot re-enable these
+paths in a marked bundle. Returning to stock is an explicit maintenance
+replacement with a verified official package, not an in-app update or a runtime
+toggle. Unmarked builds retain their existing update behavior.
 
 `bb Nightly` follows the equivalent isolated `desktop-nightly` release and
 `nightly-mac.yml`; it never reads or moves the stable feed. The scheduled

@@ -72,12 +72,14 @@ const pluginSdkVersion = readPackageVersion(
 const desktopReleaseChannel = resolveDesktopReleaseChannel(process.env);
 const desktopCommit = readBuildCommit(process.env);
 const desktopBuildDate = readBuildDate(process.env);
+const desktopCustomBuild = process.env.BB_DESKTOP_CUSTOM_BUILD?.trim() ?? "";
 
 const commonOptions = {
   bundle: true,
   define: {
     "process.env.BB_DESKTOP_BUILD_DATE": JSON.stringify(desktopBuildDate),
     "process.env.BB_DESKTOP_COMMIT": JSON.stringify(desktopCommit),
+    "process.env.BB_DESKTOP_CUSTOM_BUILD": JSON.stringify(desktopCustomBuild),
     "process.env.BB_DESKTOP_PLUGIN_SDK_VERSION":
       JSON.stringify(pluginSdkVersion),
     "process.env.BB_DESKTOP_RELEASE_CHANNEL": JSON.stringify(

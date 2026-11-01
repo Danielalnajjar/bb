@@ -3,6 +3,7 @@ export interface DesktopAboutFacts {
   buildDate: string;
   channel: "latest" | "nightly";
   commit: string;
+  customBuild: string | undefined;
   electronVersion: string;
   osArch: string;
   osRelease: string;
@@ -74,13 +75,23 @@ export function buildDesktopAboutDetails(
 ): string {
   const lines: [string, string][] = [
     ["Version", facts.version],
-    ["Build Type", facts.channel === "nightly" ? "Nightly" : "Stable"],
+    [
+      "Build Type",
+      facts.customBuild
+        ? `Custom (${facts.customBuild}; ${facts.channel} channel)`
+        : facts.channel === "nightly"
+          ? "Nightly"
+          : "Stable",
+    ],
     ["Commit", facts.commit],
     ["Date", formatBuildDate(facts.buildDate, nowMs)],
     ["Plugin SDK", facts.pluginSdkVersion],
     ["Electron", facts.electronVersion],
     ["OS", `${facts.osType} ${facts.osArch} ${facts.osRelease}`],
   ];
+  if (facts.customBuild) {
+    lines.push(["Updates", "Maintenance-managed; official updates disabled"]);
+  }
   return lines
     .map(([label, value]) => `${label}: ${displayValue(value)}`)
     .join("\n");

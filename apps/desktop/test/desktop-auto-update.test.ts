@@ -20,6 +20,7 @@ import {
 } from "../src/desktop-auto-update.js";
 import {
   DESKTOP_AUTO_UPDATE_FEED_CONFIG,
+  resolveDesktopUpdateSupport,
   type DesktopAutoUpdateFeedConfig,
 } from "../src/desktop-update-provider.js";
 
@@ -211,6 +212,70 @@ function createDeferredDownload(): DeferredDownload {
 }
 
 describe("desktop auto-update service", () => {
+  it.each(["", "prompt-suggestions"])(
+    "permits official downloads and installation only for stock packaged builds (custom: %s)",
+    async (customBuild) => {
+      const updater = new DesktopAutoUpdaterAdapterStub();
+      const support = resolveDesktopUpdateSupport({
+        canReplaceAppImage: () => true,
+        customBuild,
+        env: { BB_DESKTOP_AUTO_UPDATE: "1" },
+        platform: "macos",
+      });
+      const service = createDesktopAutoUpdateService({
+        currentVersion: "0.0.1",
+        enabled:
+          support.autoUpdate &&
+          shouldEnableDesktopAutoUpdate({
+            env: { BB_DESKTOP_AUTO_UPDATE: "1" },
+            isPackaged: true,
+          }),
+        forceDevUpdateConfig: false,
+        logger: createLogger(createLoggerMessages()),
+        now: () => Date.parse(checkedAt),
+        platform: "macos",
+        updater,
+      });
+
+      service.start();
+      try {
+        await service.checkForUpdates();
+        await service.checkAfterActive();
+        updater.emitUpdateAvailable(createUpdateInfo("0.0.2"));
+        updater.emitUpdateDownloaded(createDownloadedEvent("0.0.2"));
+        await service.installUpdate();
+
+        if (customBuild) {
+          expect(service.getInfo()).toMatchObject({
+            downloadState: "idle",
+            lastCheckedAt: null,
+            latestVersion: null,
+            pendingVersion: null,
+            updateAvailable: false,
+            updateDownloaded: false,
+          });
+          expect(updater.checkForUpdatesCalls).toBe(0);
+          expect(updater.downloadUpdateCalls).toBe(0);
+          expect(updater.quitAndInstallCalls).toBe(0);
+          expect(updater.feedConfigs).toEqual([]);
+          expect(updater.autoInstallOnAppQuit).not.toBe(true);
+        } else {
+          expect(service.getInfo()).toMatchObject({
+            pendingVersion: "0.0.2",
+            updateAvailable: true,
+            updateDownloaded: true,
+          });
+          expect(updater.checkForUpdatesCalls).toBeGreaterThan(0);
+          expect(updater.downloadUpdateCalls).toBe(1);
+          expect(updater.quitAndInstallCalls).toBe(1);
+          expect(updater.autoInstallOnAppQuit).toBe(true);
+        }
+      } finally {
+        service.stop();
+      }
+    },
+  );
+
   it("configures electron-updater for the desktop-latest GitHub release assets", () => {
     const updater = new DesktopAutoUpdaterAdapterStub();
     const messages = createLoggerMessages();

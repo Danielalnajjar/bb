@@ -192,6 +192,7 @@ import {
 import { createDesktopUpdateService } from "./desktop-update-check.js";
 import {
   createDesktopUpdateFeedUrl,
+  DESKTOP_CUSTOM_BUILD,
   DESKTOP_RELEASE_CHANNEL,
   DESKTOP_RELEASE_INFO,
   resolveDesktopUpdateSupport,
@@ -514,6 +515,7 @@ function readDesktopAboutFacts(applicationName: string): DesktopAboutFacts {
     buildDate: process.env.BB_DESKTOP_BUILD_DATE ?? "",
     channel: DESKTOP_RELEASE_CHANNEL,
     commit: process.env.BB_DESKTOP_COMMIT ?? "",
+    customBuild: DESKTOP_CUSTOM_BUILD,
     electronVersion: process.versions.electron,
     osArch: arch(),
     osRelease: release(),
@@ -2576,6 +2578,7 @@ async function spawnOwnedRuntime(
           }) &&
           resolveDesktopUpdateSupport({
             canReplaceAppImage,
+            customBuild: DESKTOP_CUSTOM_BUILD,
             env: process.env,
             platform: resolveBbDesktopPlatform(process.platform),
           }).autoUpdate,
@@ -3085,6 +3088,7 @@ async function runDesktopApp(): Promise<void> {
 
   const desktopUpdateSupport = resolveDesktopUpdateSupport({
     canReplaceAppImage,
+    customBuild: DESKTOP_CUSTOM_BUILD,
     env: process.env,
     platform: desktopPlatform,
   });
@@ -3303,6 +3307,10 @@ async function runDesktopApp(): Promise<void> {
   }
   if (desktopUpdateSupport.autoUpdate) {
     desktopAutoUpdateService.start();
+  } else if (DESKTOP_CUSTOM_BUILD) {
+    desktopLogger.info(
+      `Desktop official updates are disabled for custom build ${DESKTOP_CUSTOM_BUILD}; updates require explicit maintenance.`,
+    );
   } else {
     desktopLogger.info(
       "Desktop auto-install is disabled: only the Linux AppImage build can replace itself. Version checks still report new releases.",

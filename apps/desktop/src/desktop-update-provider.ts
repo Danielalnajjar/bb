@@ -46,6 +46,7 @@ function resolveBuiltDesktopReleaseChannel(
 export const DESKTOP_RELEASE_CHANNEL = resolveBuiltDesktopReleaseChannel(
   process.env.BB_DESKTOP_RELEASE_CHANNEL,
 );
+export const DESKTOP_CUSTOM_BUILD = process.env.BB_DESKTOP_CUSTOM_BUILD;
 export const DESKTOP_RELEASE_INFO = createDesktopReleaseInfo(
   DESKTOP_RELEASE_CHANNEL,
 );
@@ -77,6 +78,7 @@ interface DesktopUpdateSupport {
 
 interface ResolveDesktopUpdateSupportArgs {
   canReplaceAppImage: (appImagePath: string) => boolean;
+  customBuild: string | undefined;
   env: NodeJS.ProcessEnv;
   platform: BbDesktopVersionFeedPlatform;
 }
@@ -84,6 +86,10 @@ interface ResolveDesktopUpdateSupportArgs {
 export function resolveDesktopUpdateSupport(
   args: ResolveDesktopUpdateSupportArgs,
 ): DesktopUpdateSupport {
+  if (args.customBuild) {
+    return { autoUpdate: false, versionCheck: false };
+  }
+
   if (args.platform === "macos" || args.platform === "windows") {
     return { autoUpdate: true, versionCheck: true };
   }
