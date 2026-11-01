@@ -1,4 +1,10 @@
 import {
+  promptSuggestionModeSchema,
+  type PromptSuggestionMode,
+  type PromptSuggestionState,
+} from "@bb/domain";
+import { z } from "zod";
+import {
   machineEnvironmentSetSchema,
   machineEnvironmentDeleteSchema,
   type MachineEnvironmentSet,
@@ -1601,6 +1607,34 @@ export const publicApiRoutes = {
       method: "post",
       request: noRequest<PathId>(),
       response: jsonResponse<{ ok: true }>(),
+    }),
+    promptSuggestionGet: defineRoute({
+      path: "/threads/:id/prompt-suggestion",
+      method: "get",
+      request: noRequest<PathId>(),
+      response: jsonResponse<PromptSuggestionState>(),
+    }),
+    promptSuggestionConfigure: defineRoute({
+      path: "/threads/:id/prompt-suggestion/mode",
+      method: "post",
+      request: jsonRequest<PathId, { mode: PromptSuggestionMode | null }>(
+        z.object({ mode: promptSuggestionModeSchema.nullable() }).strict(),
+      ),
+      response: jsonResponse<PromptSuggestionState>(),
+    }),
+    promptSuggestionRequest: defineRoute({
+      path: "/threads/:id/prompt-suggestion/request",
+      method: "post",
+      request: noRequest<PathId>(),
+      response: jsonResponse<PromptSuggestionState>(),
+    }),
+    promptSuggestionDismiss: defineRoute({
+      path: "/threads/:id/prompt-suggestion/dismiss",
+      method: "post",
+      request: jsonRequest<PathId, { sourceTurnId: string }>(
+        z.object({ sourceTurnId: z.string().min(1) }).strict(),
+      ),
+      response: jsonResponse<PromptSuggestionState>(),
     }),
     clearGoal: defineRoute({
       path: "/threads/:id/goal/clear",

@@ -434,3 +434,18 @@ export {
   type SkillScanRoot as ExperimentalSkillScanRoot,
   type IndexedSkillFile as ExperimentalIndexedSkillFile,
 } from "@bb/skill-index";
+
+export {
+  promptSuggestionRequestParamsSchema as experimental_promptSuggestionRequestParamsSchema,
+  promptSuggestionRequestResultSchema as experimental_promptSuggestionRequestResultSchema,
+  promptSuggestionCancelParamsSchema as experimental_promptSuggestionCancelParamsSchema,
+  promptSuggestionConfigureParamsSchema as experimental_promptSuggestionConfigureParamsSchema,
+} from "@bb/provider-bridge-protocol";
+export type {
+  PromptSuggestionRequestParams as ExperimentalPromptSuggestionRequestParams,
+  PromptSuggestionRequestResult as ExperimentalPromptSuggestionRequestResult,
+  PromptSuggestionCancelParams as ExperimentalPromptSuggestionCancelParams,
+  PromptSuggestionConfigureParams as ExperimentalPromptSuggestionConfigureParams,
+} from "@bb/provider-bridge-protocol";
+export { promptSuggestionConfigurationSchema as experimental_promptSuggestionConfigurationSchema } from "@bb/domain";
+export type { PromptSuggestionConfiguration as ExperimentalPromptSuggestionConfiguration } from "@bb/domain";

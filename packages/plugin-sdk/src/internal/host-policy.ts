@@ -2833,10 +2833,9 @@ export function runPluginStorageMigrations(
     database.exec("ALTER TABLE _bb_migrations ADD COLUMN statement_hash TEXT");
   }
   const rows = database
-    .prepare<
-      [],
-      { id: number; statement_hash: string | null }
-    >("SELECT id, statement_hash FROM _bb_migrations ORDER BY id")
+    .prepare<[], { id: number; statement_hash: string | null }>(
+      "SELECT id, statement_hash FROM _bb_migrations ORDER BY id",
+    )
     .all();
   const applied = new Map<number, string | null>();
   for (const row of rows) applied.set(row.id, row.statement_hash);
@@ -3593,6 +3592,7 @@ export function normalizePluginAgentConfiguration(args: {
   toolParameterOverrides: Map<string, Record<string, unknown>>;
   skillIds: string[];
   instructions: string | null;
+  promptSuggestions: boolean;
 } {
   if (
     typeof args.value !== "object" ||
@@ -3605,7 +3605,15 @@ export function normalizePluginAgentConfiguration(args: {
   }
   const output = args.value as Record<string, unknown>;
   const unknownKeys = Object.keys(output)
-    .filter((key) => !["tools", "skills", "instructions"].includes(key))
+    .filter(
+      (key) =>
+        ![
+          "tools",
+          "skills",
+          "instructions",
+          "experimental_promptSuggestions",
+        ].includes(key),
+    )
     .sort();
   if (unknownKeys.length > 0) {
     throw new Error(
@@ -3617,6 +3625,14 @@ export function normalizePluginAgentConfiguration(args: {
     typeof output.instructions !== "string"
   ) {
     throw new Error("configure() output.instructions must be a string");
+  }
+  if (
+    output.experimental_promptSuggestions !== undefined &&
+    output.experimental_promptSuggestions !== false
+  ) {
+    throw new Error(
+      "configure() output.experimental_promptSuggestions must be false when supplied",
+    );
   }
   const instructions =
     typeof output.instructions === "string" &&
@@ -3632,6 +3648,7 @@ export function normalizePluginAgentConfiguration(args: {
     value: output.tools,
   });
   return {
+    promptSuggestions: output.experimental_promptSuggestions !== false,
     toolIds: toolSelections.toolIds,
     toolParameterOverrides: toolSelections.parameterOverrides,
     skillIds: normalizePluginAgentSelectionIds({

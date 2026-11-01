@@ -47,6 +47,7 @@ export function getEventProviderThreadId(
       return decoded.providerThreadId;
     case "turn/completed":
       return decoded.providerThreadId ?? undefined;
+    case "thread/promptSuggestion/updated":
     case "thread/started":
     case "client/thread/start":
     case "client/turn/requested":
@@ -89,6 +90,7 @@ export function getEventParentToolCallId(
     case "provider/unhandled":
     case "turn/started":
       return decoded.parentToolCallId;
+    case "thread/promptSuggestion/updated":
     case "thread/started":
     case "thread/identity":
     case "turn/completed":

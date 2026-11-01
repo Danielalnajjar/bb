@@ -265,6 +265,11 @@ function createFakeRuntime(): AgentRuntime {
     async stopThread() {
       return { providerCheckpointId: null };
     },
+    async requestPromptSuggestion({ sourceTurnId }) {
+      return { sourceTurnId, text: null };
+    },
+    async cancelPromptSuggestion() {},
+    async configurePromptSuggestions() {},
     async clearThreadGoal() {
       return { cleared: true };
     },

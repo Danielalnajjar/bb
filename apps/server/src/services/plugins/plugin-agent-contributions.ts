@@ -54,6 +54,7 @@ export async function resolvePluginAgentConfiguration(args: {
   const active = contributions;
   if (!active?.resolveAgentConfiguration) {
     return {
+      promptSuggestions: true,
       tools: active?.listAgentTools() ?? [],
       selectedSkillIdsByPlugin: new Map<string, ReadonlySet<string>>(),
       dynamicInstructions: [] as Array<{ pluginId: string; text: string }>,

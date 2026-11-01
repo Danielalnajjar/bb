@@ -203,3 +203,14 @@ Lifecycle ownership:
   dependents; deleting it deletes them. Unarchive the owner before explicitly
   restoring a dependent. Stop does not cascade. Sidebar parents and ordinary
   forks keep their own policies.
+
+### Next-prompt suggestions
+
+Suggestions are gray, editable draft candidates. Accepting one never sends it. Supported Codex models and Claude Opus default to Automatic; Claude Fable defaults to Button. Other providers are Off. Workers, children, descendants and Crew cards (including adopted cards) cannot generate suggestions.
+
+- `bb thread prompt-suggestion get [id] [--self] [--json]` reads current transient state.
+- `bb thread prompt-suggestion mode <automatic|button|off|default> [id] [--self] [--json]` persists a per-thread override, or removes it with `default`. Changing a loaded thread's mode requires it to be idle; retry after its turn completes if it is busy.
+- `bb thread prompt-suggestion request [id] [--self] [--json]` infers once on the current model and real session. Button mode does not generate before this action. A completed source turn is required.
+- `bb thread prompt-suggestion dismiss [id] --source-turn <completed-bb-turn-id> [--self] [--json]` clears that source's suggestion. A stale dismissal cannot erase a newer suggestion.
+
+Only the mode override is durable. Restarting the server starts with no suggestion text. Sending a new prompt, changing model or mode, or changing source/context clears stale text and cancels pending requests. No helper model, independent worker, or summarized transcript supplies these predictions.

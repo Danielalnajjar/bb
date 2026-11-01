@@ -1,3 +1,4 @@
+import { invalidatePromptSuggestion } from "./prompt-suggestions.js";
 import {
   appendStoredThreadEventsInTransaction,
   createEventId,
@@ -470,6 +471,12 @@ export function appendThreadEvent(
   deps: Pick<AppDeps, "db" | "hub">,
   args: AppendThreadEventArgs,
 ): number {
+  if (
+    args.type === "client/turn/requested" ||
+    args.type === "thread/context/cleared" ||
+    args.type === "thread/compacted"
+  )
+    invalidatePromptSuggestion(deps, args.threadId);
   const result = deps.db.transaction(
     (tx) => appendThreadEventInTransactionWithAttention(tx, args),
     { behavior: "immediate" },

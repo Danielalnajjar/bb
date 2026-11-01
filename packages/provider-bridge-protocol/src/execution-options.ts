@@ -1,4 +1,5 @@
 import {
+  promptSuggestionConfigurationSchema,
   promptModeSchema,
   reasoningLevelSchema,
   runtimePermissionPolicySchema,
@@ -9,6 +10,7 @@ import { z } from "zod";
 
 export const bridgeExecutionOptionsSchema = z
   .object({
+    promptSuggestions: promptSuggestionConfigurationSchema.optional(),
     model: z.string().min(1).optional(),
     serviceTier: serviceTierSchema.optional(),
     reasoningLevel: reasoningLevelSchema.optional(),

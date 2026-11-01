@@ -736,3 +736,22 @@ describe("deferred text flush", () => {
     }
   });
 });
+
+it("only forwards prediction RPCs when the bridge advertised them", () => {
+  const adapter = makeAdapter();
+  const command = {
+    type: "thread/prompt-suggestion/request" as const,
+    threadId: "bb-1",
+    providerThreadId: "native-1",
+    requestId: "sample-1",
+    sourceTurnId: "canonical-1",
+    prompt: "predict",
+  };
+  expect(adapter.buildCommandPlan(command)).toMatchObject({ kind: "noop" });
+  completeHandshake(adapter, { promptSuggestions: true });
+  expect(adapter.buildCommandPlan(command)).toMatchObject({
+    kind: "request",
+    method: "thread/prompt-suggestion/request",
+    params: { sourceTurnId: "canonical-1", prompt: "predict" },
+  });
+});

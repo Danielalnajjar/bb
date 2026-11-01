@@ -1367,3 +1367,13 @@ export const projectAttachmentBackfills = sqliteTable(
     error: text("error"),
   },
 );
+
+export const threadPromptSuggestionPreferences = sqliteTable(
+  "thread_prompt_suggestion_preferences",
+  {
+    threadId: text("thread_id")
+      .primaryKey()
+      .references(() => threads.id, { onDelete: "cascade" }),
+    mode: text("mode", { enum: ["automatic", "button", "off"] }).notNull(),
+  },
+);

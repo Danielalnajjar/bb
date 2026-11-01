@@ -1,3 +1,4 @@
+import { synchronizePromptSuggestionEligibility } from "../../services/threads/prompt-suggestions.js";
 import { countUnarchivedThreadDescendants } from "../../services/threads/thread-archive.js";
 import { listThreadCascades } from "../../services/threads/thread-cascade.js";
 import { cancelAbandonedProviderCreations } from "../../services/threads/thread-environment-providers.js";
@@ -496,6 +497,14 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
         : requirePublicThread(deps.db, thread.id);
     if (!updated) {
       throw new ApiError(404, "thread_not_found", "Thread not found");
+    }
+
+    if (
+      "model" in payload ||
+      "parentThreadId" in payload ||
+      "visibility" in payload
+    ) {
+      await synchronizePromptSuggestionEligibility(deps, updated.id);
     }
 
     if (payload.title && payload.title !== thread.title) {

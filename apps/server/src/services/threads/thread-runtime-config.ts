@@ -1,3 +1,4 @@
+import { resolvePromptSuggestionConfiguration } from "./prompt-suggestions.js";
 import {
   resolveHostEnvironment,
   mergeHostAndProviderEnvironment,
@@ -10,6 +11,7 @@ import type {
   Thread,
   ThreadTurnInitiator,
   EnvironmentStatus,
+  PromptSuggestionConfiguration,
 } from "@bb/domain";
 import type {
   HostDaemonContributedEnvEntry,
@@ -61,6 +63,7 @@ interface ResolvePermissionEscalationArgs {
 }
 
 export interface ResolvedThreadRuntimeCommandConfig {
+  promptSuggestions: PromptSuggestionConfiguration;
   contributedEnv: HostDaemonContributedEnvEntry[];
   dynamicTools: DynamicTool[];
   injectedSkillSources: HostDaemonInjectedSkillSource[];
@@ -140,51 +143,10 @@ export async function resolveThreadRuntimeCommandConfig(
     workspacePath,
   });
   markTurnTraceSpan("runtimeConfig.workspaceRead");
-  const pluginSkillRoots = getPluginSkillRootContributions();
-  const skillIdsByPlugin = await discoverPluginSkillIds(deps.logger, {
-    pluginSkillRoots,
-    skillTreeRegistry: deps.skillTreeRegistry,
-  });
-  const conditionalConfiguration = await resolvePluginAgentConfiguration({
-    context: {
-      thread: {
-        id: args.thread.id,
-        title: args.thread.title,
-        parentThreadId: args.thread.parentThreadId,
-        sourceThreadId: args.thread.sourceThreadId,
-      },
-      project: {
-        id: project.id,
-        kind: project.kind,
-        name: project.name,
-        gitRemoteUrl: project.gitRemoteUrl,
-      },
-      environment: {
-        id: environment.id,
-        name: environment.name,
-        path: environment.path,
-        branchName: environment.branchName,
-        workspaceProvisionType: resolveDeprecatedWorkspaceProvisionType(
-          environment.environmentProviderId,
-        ),
-      },
-      host: { id: host.id, name: host.name },
-      provider: {
-        id: args.thread.providerId,
-        model: args.model,
-        capabilities: {
-          supportsNativeUserQuestion:
-            deps.providerRegistry.get(args.thread.providerId)?.info.capabilities
-              .supportsNativeUserQuestion ?? false,
-        },
-      },
-      origin: {
-        kind: args.thread.originKind,
-        pluginId: args.thread.originPluginId,
-      },
-    },
-    skillIdsByPlugin,
-  });
+  const conditionalConfiguration = await resolveThreadPluginAgentConfiguration(
+    deps,
+    args,
+  );
   markTurnTraceSpan("runtimeConfig.pluginConfig");
   const contributedEnv = mergeHostAndProviderEnvironment(
     await resolveHostEnvironment(deps, {
@@ -282,6 +244,12 @@ export async function resolveThreadRuntimeCommandConfig(
   });
   markTurnTraceSpan("runtimeConfig.built");
   return {
+    promptSuggestions: resolvePromptSuggestionConfiguration(
+      deps,
+      args.thread,
+      args.model,
+      conditionalConfiguration.promptSuggestions,
+    ),
     contributedEnv,
     dynamicTools,
     injectedSkillSources,
@@ -292,4 +260,68 @@ export async function resolveThreadRuntimeCommandConfig(
     threadStoragePath,
     workspacePath,
   };
+}
+
+export async function resolveThreadPluginAgentConfiguration(
+  deps: LoggedWorkSessionDeps,
+  args: ResolveThreadRuntimeCommandConfigArgs,
+) {
+  const project = getProject(deps.db, args.thread.projectId);
+  if (!project) {
+    throw new ApiError(404, "project_not_found", "Project not found");
+  }
+  const environment = getEnvironment(deps.db, args.environment.id);
+  if (!environment) {
+    throw new ApiError(404, "environment_not_found", "Environment not found");
+  }
+  const host = getHost(deps.db, args.environment.hostId);
+  if (!host) {
+    throw new ApiError(404, "host_not_found", "Host not found");
+  }
+
+  const pluginSkillRoots = getPluginSkillRootContributions();
+  const skillIdsByPlugin = await discoverPluginSkillIds(deps.logger, {
+    pluginSkillRoots,
+    skillTreeRegistry: deps.skillTreeRegistry,
+  });
+  return resolvePluginAgentConfiguration({
+    context: {
+      thread: {
+        id: args.thread.id,
+        title: args.thread.title,
+        parentThreadId: args.thread.parentThreadId,
+        sourceThreadId: args.thread.sourceThreadId,
+      },
+      project: {
+        id: project.id,
+        kind: project.kind,
+        name: project.name,
+        gitRemoteUrl: project.gitRemoteUrl,
+      },
+      environment: {
+        id: environment.id,
+        name: environment.name,
+        path: environment.path,
+        branchName: environment.branchName,
+        workspaceProvisionType: resolveDeprecatedWorkspaceProvisionType(
+          environment.environmentProviderId,
+        ),
+      },
+      host: { id: host.id, name: host.name },
+      provider: {
+        id: args.thread.providerId,
+        model: args.model,
+        capabilities: {
+          supportsNativeUserQuestion:
+            deps.providerRegistry.get(args.thread.providerId)?.info.capabilities
+              .supportsNativeUserQuestion ?? false,
+        },
+      },
+      origin: {
+        kind: args.thread.originKind,
+        pluginId: args.thread.originPluginId,
+      },
+    },
+    skillIdsByPlugin,
+  });
 }

@@ -275,6 +275,11 @@ export function createFakeRuntime() {
       providerSessionsByThreadId.delete(args.threadId);
       return { providerCheckpointId: null };
     },
+    async requestPromptSuggestion({ sourceTurnId }) {
+      return { sourceTurnId, text: null };
+    },
+    async cancelPromptSuggestion() {},
+    async configurePromptSuggestions() {},
     async clearThreadGoal() {
       return { cleared: true };
     },

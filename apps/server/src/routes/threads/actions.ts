@@ -1,3 +1,9 @@
+import {
+  getPromptSuggestion,
+  configurePromptSuggestion,
+  requestPromptSuggestion,
+  dismissPromptSuggestion,
+} from "../../services/threads/prompt-suggestions.js";
 import { refreshProviderRetirement } from "../../services/environments/environment-engine.js";
 import {
   deleteQueuedThreadMessage,
@@ -203,10 +209,34 @@ function assertPinnedThreadOrderResult(
 }
 
 export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
-  const { post, patch, del } = typedRoutes<PublicApiSchema>(app, {
+  const { get, post, patch, del } = typedRoutes<PublicApiSchema>(app, {
     onValidationError: (msg) => new ApiError(400, "invalid_request", msg),
   });
   const routes = publicApiRoutes.threads;
+  get(routes.promptSuggestionGet, async (context) =>
+    context.json(await getPromptSuggestion(deps, context.req.param("id"))),
+  );
+  post(routes.promptSuggestionConfigure, async (context, payload) =>
+    context.json(
+      await configurePromptSuggestion(
+        deps,
+        context.req.param("id"),
+        payload.mode,
+      ),
+    ),
+  );
+  post(routes.promptSuggestionRequest, async (context) =>
+    context.json(await requestPromptSuggestion(deps, context.req.param("id"))),
+  );
+  post(routes.promptSuggestionDismiss, async (context, payload) =>
+    context.json(
+      await dismissPromptSuggestion(
+        deps,
+        context.req.param("id"),
+        payload.sourceTurnId,
+      ),
+    ),
+  );
 
   post(routes.send, async (context, payload) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));

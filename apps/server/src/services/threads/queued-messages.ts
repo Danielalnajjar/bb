@@ -107,7 +107,7 @@ import { resolvePromptAttachmentReferences } from "../projects/attachments.js";
 import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
 import { assertThreadHostAcceptsWork } from "./thread-host-admission.js";
 import {
-  ThreadContextClearInProgressError,
+  ThreadContextMutationInProgressError,
   withThreadSendGuard,
 } from "./thread-context-mutation-guard.js";
 
@@ -831,7 +831,7 @@ export async function sendQueuedMessage(
     releaseQueuedMessageClaims(deps, queuedMessages);
     if (
       isQueuedMessageAutoSendPausedError(error) ||
-      error instanceof ThreadContextClearInProgressError ||
+      error instanceof ThreadContextMutationInProgressError ||
       error instanceof ParentSystemMessageCompactionActiveError
     ) {
       return toThreadQueuedMessage(queuedMessages[0]!);
@@ -915,7 +915,7 @@ export async function sendNextQueuedMessageIfPresent(
     if (
       isQueuedMessageClaimLostError(error) ||
       isQueuedMessageAutoSendPausedError(error) ||
-      error instanceof ThreadContextClearInProgressError ||
+      error instanceof ThreadContextMutationInProgressError ||
       error instanceof ParentSystemMessageCompactionActiveError
     ) {
       return false;

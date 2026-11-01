@@ -1,3 +1,4 @@
+import { promptSuggestionRequestResultSchema } from "@bb/provider-bridge-protocol";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { z } from "zod";
@@ -266,6 +267,12 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
   let nextRequestId = 1;
   const threadIdentityRegistry = new RuntimeThreadIdentityRegistry();
   const threadRuntimeConfigs = new Map<string, ThreadRuntimeConfig>();
+  const suggestionRequests = new Map<string, string>();
+  const suggestionPreparations = new Map<string, Promise<void>>();
+  const suggestionSourceTurns = new Map<
+    string,
+    { requestId: string; turnId: string; completed: boolean }
+  >();
   const rateLimitedRetryDelaysMs =
     options.rateLimitRetry?.delaysMs ?? DEFAULT_RATE_LIMITED_RETRY_DELAYS_MS;
   const threadCreationRequestTimeoutMs =
@@ -796,6 +803,20 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
     }
   }
 
+  function cancelInFlightSuggestion(threadId: string): void {
+    const requestId = suggestionRequests.get(threadId);
+    if (!requestId) return;
+    suggestionRequests.delete(threadId);
+    void runtime
+      .cancelPromptSuggestion({ threadId, requestId })
+      .catch((error: unknown) => {
+        options.onStderr?.(
+          `Prompt suggestion cancellation failed: ${String(error)}`,
+          threadId,
+        );
+      });
+  }
+
   function assertThreadCanStartTurn(threadId: string): void {
     if (
       turnState.getActiveTurnId(threadId) !== null ||
@@ -1263,11 +1284,49 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       }
 
       const normalizedEvent = normalizeProviderThreadNameEvent(stampedEvent);
+      if (normalizedEvent.type === "thread/promptSuggestion/updated") {
+        const config = threadRuntimeConfigs.get(targetThreadId)?.options;
+        if (
+          !config?.promptSuggestions?.automatic ||
+          config.promptSuggestions.sourceRequestId !==
+            normalizedEvent.sourceRequestId ||
+          config.model !== normalizedEvent.model ||
+          turnState.getActiveTurnId(targetThreadId) ||
+          pendingTurnStarts.has(targetThreadId)
+        )
+          continue;
+      }
       if (
         normalizedEvent.type === "turn/completed" &&
         normalizedEvent.scope.kind === "turn"
       ) {
         toolCalls.cancelThread(targetThreadId, normalizedEvent.scope.turnId);
+      }
+      if (
+        normalizedEvent.type === "turn/input/accepted" &&
+        normalizedEvent.scope.kind === "turn"
+      ) {
+        cancelInFlightSuggestion(targetThreadId);
+        suggestionSourceTurns.set(targetThreadId, {
+          requestId: normalizedEvent.clientRequestId,
+          turnId: normalizedEvent.scope.turnId,
+          completed: false,
+        });
+      }
+      if (
+        normalizedEvent.type === "turn/completed" &&
+        normalizedEvent.scope.kind === "turn"
+      ) {
+        const source = suggestionSourceTurns.get(targetThreadId);
+        if (source?.turnId === normalizedEvent.scope.turnId)
+          source.completed = normalizedEvent.status === "completed";
+      }
+      if (
+        normalizedEvent.type === "thread/compacted" ||
+        normalizedEvent.type === "thread/context/cleared"
+      ) {
+        cancelInFlightSuggestion(targetThreadId);
+        suggestionSourceTurns.delete(targetThreadId);
       }
       turnState.observe(normalizedEvent);
       backgroundWorkState.observe(normalizedEvent);
@@ -1989,6 +2048,9 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       contributedEnv,
       instructions,
     }) {
+      cancelInFlightSuggestion(threadId);
+      const preparation = suggestionPreparations.get(threadId);
+      if (preparation) await preparation;
       return runThreadOperation({
         threadId,
         work: async () => {
@@ -2094,6 +2156,9 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       contributedEnv,
       instructions,
     }) {
+      cancelInFlightSuggestion(threadId);
+      const preparation = suggestionPreparations.get(threadId);
+      if (preparation) await preparation;
       return runThreadOperation({
         threadId,
         work: async () => {
@@ -2214,6 +2279,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
     },
 
     async stopThread({ threadId }) {
+      cancelInFlightSuggestion(threadId);
       toolCalls.cancelThread(threadId);
       return runThreadOperation({
         threadId,
@@ -2251,6 +2317,216 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
           return {
             providerCheckpointId: result.providerCheckpointId ?? null,
           };
+        },
+      });
+    },
+
+    async requestPromptSuggestion({
+      threadId,
+      requestId,
+      sourceTurnId,
+      prompt,
+      options: requestedOptions,
+    }) {
+      if (
+        turnState.getActiveTurnId(threadId) ||
+        threadHasInFlightOperation(threadId)
+      ) {
+        throw new Error("Thread is busy; retry after the turn completes");
+      }
+      if (pendingTurnStarts.has(threadId) || suggestionRequests.has(threadId)) {
+        throw new Error("Thread already has a pending request");
+      }
+      const existing = threadRuntimeConfigs.get(threadId);
+      const requestedConfiguration = requestedOptions.promptSuggestions;
+      const existingSourceRequestId =
+        existing?.options.promptSuggestions?.sourceRequestId;
+      const source = suggestionSourceTurns.get(threadId);
+      if (
+        !requestedConfiguration?.sourceRequestId ||
+        (existingSourceRequestId &&
+          existingSourceRequestId !== requestedConfiguration.sourceRequestId) ||
+        (source &&
+          (!source.completed ||
+            source.turnId !== sourceTurnId ||
+            source.requestId !== requestedConfiguration.sourceRequestId))
+      ) {
+        throw new Error("Prompt suggestion source changed");
+      }
+      if (
+        existing &&
+        (existing.options.model !== requestedOptions.model ||
+          !existingSourceRequestId)
+      ) {
+        suggestionRequests.set(threadId, requestId);
+        const providerThreadId = requireProviderThreadId(threadId);
+        const preparation = (async () => {
+          const proc = requireProviderProcessForThread(threadId);
+          if (existing.options.model === requestedOptions.model) {
+            const command: AdapterCommand = {
+              type: "thread/prompt-suggestion/configure",
+              threadId,
+              providerThreadId,
+              configuration: requestedConfiguration,
+            };
+            const message = requireProviderRequestPlan({
+              commandType: command.type,
+              plan: proc.adapter.buildCommandPlan(command),
+              providerId: existing.providerId,
+            });
+            await sendCommand({ proc, message, resultSchema: z.object({}) });
+            const config = threadRuntimeConfigs.get(threadId);
+            if (suggestionRequests.get(threadId) === requestId && config)
+              config.options = {
+                ...config.options,
+                promptSuggestions: requestedConfiguration,
+              };
+            return;
+          }
+          const stop: AdapterCommand = {
+            type: "thread/stop",
+            threadId,
+            providerThreadId,
+            activeTurnId: null,
+          };
+          const plan = proc.adapter.buildCommandPlan(stop);
+          if (plan.kind !== "noop")
+            await sendCommand({
+              proc,
+              message: plan,
+              resultSchema: providerThreadStopResultSchema,
+            });
+          forgetThreadRuntimeStateForProviderState(proc.identity, threadId);
+          await resumeThreadFromConfig({
+            currentConfig: existing,
+            instructions: existing.instructions,
+            options: requestedOptions,
+            providerThreadId,
+            threadId,
+          });
+        })();
+        suggestionPreparations.set(threadId, preparation);
+        try {
+          await preparation;
+          if (suggestionRequests.get(threadId) !== requestId)
+            return { sourceTurnId, text: null };
+        } catch (error) {
+          if (suggestionRequests.get(threadId) === requestId)
+            suggestionRequests.delete(threadId);
+          throw error;
+        } finally {
+          suggestionPreparations.delete(threadId);
+        }
+      }
+      const proc = requireProviderProcessForThread(threadId);
+      const configuration =
+        threadRuntimeConfigs.get(threadId)?.options.promptSuggestions;
+      if (
+        !configuration?.sourceRequestId ||
+        configuration.sourceRequestId !==
+          requestedOptions.promptSuggestions?.sourceRequestId
+      ) {
+        throw new Error("Prompt suggestion source changed");
+      }
+      const currentSource = suggestionSourceTurns.get(threadId);
+      if (
+        currentSource &&
+        (!currentSource.completed ||
+          currentSource.turnId !== sourceTurnId ||
+          currentSource.requestId !== configuration.sourceRequestId)
+      ) {
+        throw new Error("Prompt suggestion source changed");
+      }
+      const command: AdapterCommand = {
+        type: "thread/prompt-suggestion/request",
+        threadId,
+        providerThreadId: requireProviderThreadId(threadId),
+        requestId,
+        sourceTurnId,
+        prompt,
+      };
+      const message = requireProviderRequestPlan({
+        commandType: command.type,
+        plan: proc.adapter.buildCommandPlan(command),
+        providerId: threadIdentityRegistry.resolveProviderForThread(threadId),
+      });
+      suggestionRequests.set(threadId, requestId);
+      let result;
+      try {
+        result = await sendCommand({
+          proc,
+          message,
+          resultSchema: promptSuggestionRequestResultSchema,
+        });
+      } catch (error) {
+        if (suggestionRequests.get(threadId) === requestId)
+          cancelInFlightSuggestion(threadId);
+        throw error;
+      }
+      const currentRequest = suggestionRequests.get(threadId);
+      if (currentRequest === requestId) suggestionRequests.delete(threadId);
+      if (
+        currentRequest !== requestId ||
+        turnState.getActiveTurnId(threadId) ||
+        pendingTurnStarts.has(threadId) ||
+        configuration !==
+          threadRuntimeConfigs.get(threadId)?.options.promptSuggestions ||
+        result.sourceTurnId !== sourceTurnId
+      ) {
+        return { sourceTurnId, text: null };
+      }
+      return result;
+    },
+
+    async cancelPromptSuggestion({ threadId, requestId }) {
+      if (suggestionRequests.get(threadId) === requestId)
+        suggestionRequests.delete(threadId);
+      if (!threadRuntimeConfigs.has(threadId)) return;
+      const proc = requireProviderProcessForThread(threadId);
+      const command: AdapterCommand = {
+        type: "thread/prompt-suggestion/cancel",
+        threadId,
+        providerThreadId: requireProviderThreadId(threadId),
+        requestId,
+      };
+      const message = proc.adapter.buildCommandPlan(command);
+      if (message.kind !== "noop")
+        await sendCommand({ proc, message, resultSchema: z.object({}) });
+    },
+
+    async configurePromptSuggestions({ threadId, configuration }) {
+      if (
+        threadHasInFlightOperation(threadId) ||
+        suggestionPreparations.has(threadId)
+      ) {
+        throw new Error("Thread is busy; retry after the turn completes");
+      }
+      cancelInFlightSuggestion(threadId);
+      return runThreadOperation({
+        threadId,
+        work: async () => {
+          if (
+            turnState.getActiveTurnId(threadId) ||
+            pendingTurnStarts.has(threadId)
+          ) {
+            throw new Error("Thread is busy; retry after the turn completes");
+          }
+          const proc = requireProviderProcessForThread(threadId);
+          const command: AdapterCommand = {
+            type: "thread/prompt-suggestion/configure",
+            threadId,
+            providerThreadId: requireProviderThreadId(threadId),
+            configuration,
+          };
+          const message = proc.adapter.buildCommandPlan(command);
+          if (message.kind === "noop") return;
+          await sendCommand({ proc, message, resultSchema: z.object({}) });
+          const config = threadRuntimeConfigs.get(threadId);
+          if (config)
+            config.options = {
+              ...config.options,
+              promptSuggestions: configuration,
+            };
         },
       });
     },

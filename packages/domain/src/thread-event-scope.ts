@@ -64,6 +64,10 @@ interface ThreadEventScopePolicyDefinitionEntry {
 }
 
 const threadEventScopeDefinitionByType = {
+  "thread/promptSuggestion/updated": {
+    policy: "thread",
+    rationale: "Transient prediction outside turn chronology; never stored.",
+  },
   "thread/started": {
     policy: "thread",
     rationale: "Thread lifecycle event; it creates the thread timeline itself.",

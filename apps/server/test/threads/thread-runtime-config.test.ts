@@ -1180,6 +1180,7 @@ describe("thread runtime config", () => {
           pluginContexts.push(args.context);
           return {
             tools: [],
+            promptSuggestions: true,
             selectedSkillIdsByPlugin: new Map(),
             dynamicInstructions: [],
           };

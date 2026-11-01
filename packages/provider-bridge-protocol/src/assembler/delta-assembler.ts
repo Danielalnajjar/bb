@@ -1890,6 +1890,18 @@ export function createDeltaAssembler(
         return;
       }
 
+      case "prompt.suggestion": {
+        events.push({
+          type: "thread/promptSuggestion/updated",
+          threadId: UNSTAMPED_THREAD_ID,
+          scope: threadScope(),
+          sourceRequestId: delta.sourceRequestId,
+          model: delta.model,
+          text: delta.text,
+        });
+        return;
+      }
+
       case "context.compacted": {
         const turnId =
           delta.providerTurnId !== undefined

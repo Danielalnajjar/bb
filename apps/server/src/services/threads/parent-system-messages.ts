@@ -52,7 +52,7 @@ import {
 } from "../hosts/live-command.js";
 import { queueInputForStartingTurn } from "./thread-turn-starting.js";
 import {
-  ThreadContextClearInProgressError,
+  ThreadContextMutationInProgressError,
   withThreadSendGuard,
 } from "./thread-context-mutation-guard.js";
 import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
@@ -476,7 +476,7 @@ export async function queueParentSystemMessage(
     } catch (error) {
       hostUnavailable = isHostUnavailableApiError(error);
       if (
-        !(error instanceof ThreadContextClearInProgressError) &&
+        !(error instanceof ThreadContextMutationInProgressError) &&
         !(error instanceof ParentSystemMessageCompactionActiveError) &&
         !hostUnavailable
       ) {

@@ -1,3 +1,4 @@
+import { invalidatePromptSuggestion } from "./prompt-suggestions.js";
 import { environments, hasStoredSpawnAgentToolCall, threads } from "@bb/db";
 import { and, eq, isNull } from "drizzle-orm";
 import {
@@ -226,18 +227,19 @@ function toRuntimeExecutionOptions(
     args.projectId,
     args.hostId,
   );
-  const model = args.deps.lifecycleDedupers.providerModelCatalogs.getCachedModel(
-    args.deps,
-    {
-      hostId: args.hostId,
-      providerId: args.providerId,
-      workspacePaths:
-        checkoutPath === undefined
-          ? [args.workspacePath]
-          : [args.workspacePath, checkoutPath],
-      model: args.execution.model,
-    },
-  );
+  const model =
+    args.deps.lifecycleDedupers.providerModelCatalogs.getCachedModel(
+      args.deps,
+      {
+        hostId: args.hostId,
+        providerId: args.providerId,
+        workspacePaths:
+          checkoutPath === undefined
+            ? [args.workspacePath]
+            : [args.workspacePath, checkoutPath],
+        model: args.execution.model,
+      },
+    );
   const reasoningLevel =
     model === null ||
     model.supportedReasoningEfforts.some(
@@ -323,14 +325,20 @@ export async function buildThreadStartCommand(
     ...(args.inputGroups !== undefined
       ? { inputGroups: args.inputGroups }
       : {}),
-    options: toRuntimeExecutionOptions({
-      ...args,
-      deps,
-      hostId: args.environment.hostId,
-      workspacePath: runtimeContext.workspacePath,
-      input: args.input,
-      threadId: args.thread.id,
-    }),
+    options: {
+      ...toRuntimeExecutionOptions({
+        ...args,
+        deps,
+        hostId: args.environment.hostId,
+        workspacePath: runtimeContext.workspacePath,
+        input: args.input,
+        threadId: args.thread.id,
+      }),
+      promptSuggestions: {
+        ...runtimeContext.promptSuggestions,
+        sourceRequestId: args.requestId,
+      },
+    },
     instructions: runtimeContext.instructions,
     dynamicTools: runtimeContext.dynamicTools,
     contributedEnv: runtimeContext.contributedEnv,
@@ -357,13 +365,16 @@ function buildPreparedTurnSubmitCommandPayload(
     ...(args.inputGroups !== undefined
       ? { inputGroups: args.inputGroups }
       : {}),
-    options: toRuntimeExecutionOptions({
-      ...args,
-      input: args.input,
-      projectId: args.runtimeContext.projectId,
-      providerId: args.runtimeContext.providerId,
-      workspacePath: args.runtimeContext.workspacePath,
-    }),
+    options: {
+      promptSuggestions: args.runtimeContext.promptSuggestions,
+      ...toRuntimeExecutionOptions({
+        ...args,
+        input: args.input,
+        projectId: args.runtimeContext.projectId,
+        providerId: args.runtimeContext.providerId,
+        workspacePath: args.runtimeContext.workspacePath,
+      }),
+    },
     target: args.target,
     resumeContext: {
       workspaceContext: workspaceContextFromPath({
@@ -388,6 +399,17 @@ export function addRequestIdToTurnSubmitCommandPayload(
   return {
     ...args.preparedCommand,
     requestId: args.requestId,
+    options: {
+      ...args.preparedCommand.options,
+      ...(args.preparedCommand.options.promptSuggestions
+        ? {
+            promptSuggestions: {
+              ...args.preparedCommand.options.promptSuggestions,
+              sourceRequestId: args.requestId,
+            },
+          }
+        : {}),
+    },
   };
 }
 
@@ -395,6 +417,7 @@ export async function prepareTurnSubmitCommandPayload(
   deps: LoggedWorkSessionDeps,
   args: PrepareTurnSubmitCommandPayloadArgs,
 ): Promise<PreparedTurnSubmitCommandPayload> {
+  if (args.input.length > 0) invalidatePromptSuggestion(deps, args.thread.id);
   await deps.providerRegistry.whenRegistrationsSettled();
   const providerThreadId = requireProviderThreadId(
     args.providerThreadId ??

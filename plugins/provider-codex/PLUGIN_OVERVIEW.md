@@ -12,6 +12,10 @@ Start a thread, pick Codex, and let it write and review code in your repository 
 - Health, usage, and install status on each host, with an install or update action.
 - A Codex AI service for inference and voice that other bb features can use.
 
+## Prompt suggestions
+
+Eligible parent threads use the server-selected Automatic, Button, or Off mode. Suggestions sample the existing idle Codex session with its current model and context, without adding a conversation turn. Native `thread/sample` support is required (verified on Codex 0.166.0); unsupported app-servers report unavailable instead of using a separate generation session. New input, steering, mode changes, and session release cancel pending samples.
+
 ## Settings
 
 - `Codex memory`: let Codex recall and create memories from bb threads.

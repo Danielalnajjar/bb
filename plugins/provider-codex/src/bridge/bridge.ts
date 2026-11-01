@@ -47,6 +47,12 @@ import {
   type ProviderRuntimeEvent,
   experimental_defineProviderBridge,
   type ProviderRecoveryHint,
+  experimental_promptSuggestionRequestParamsSchema,
+  experimental_promptSuggestionCancelParamsSchema,
+  experimental_promptSuggestionConfigureParamsSchema,
+  type ExperimentalPromptSuggestionRequestParams,
+  type ExperimentalPromptSuggestionCancelParams,
+  type ExperimentalPromptSuggestionConfigureParams,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { z } from "zod";
 import {
@@ -108,6 +114,8 @@ import {
   getCodexProviderUsage,
 } from "./provider-maintenance.js";
 
+import { CodexPromptSuggestions } from "./prompt-suggestions.js";
+
 type BbThreadResumeParams = ThreadResumeParams & { excludeTurns: boolean };
 
 const codexBridgeCommandSchema = z.discriminatedUnion("method", [
@@ -143,6 +151,18 @@ const codexBridgeCommandSchema = z.discriminatedUnion("method", [
   z.object({
     method: z.literal("thread/fork"),
     params: threadForkParamsSchema,
+  }),
+  z.object({
+    method: z.literal("thread/prompt-suggestion/request"),
+    params: experimental_promptSuggestionRequestParamsSchema,
+  }),
+  z.object({
+    method: z.literal("thread/prompt-suggestion/cancel"),
+    params: experimental_promptSuggestionCancelParamsSchema,
+  }),
+  z.object({
+    method: z.literal("thread/prompt-suggestion/configure"),
+    params: experimental_promptSuggestionConfigureParamsSchema,
   }),
   z.object({ method: z.literal("turn/start"), params: turnStartParamsSchema }),
   z.object({ method: z.literal("turn/steer"), params: turnSteerParamsSchema }),
@@ -494,6 +514,7 @@ interface CodexBridgeSession {
   previousChildExit: Promise<void> | null;
   releasePromise: Promise<void> | null;
   goalStatus: CodexGoalStatus | null;
+  promptSuggestions: CodexPromptSuggestions;
 }
 
 const sessionsByBbThreadId = new Map<string, CodexBridgeSession>();
@@ -523,6 +544,7 @@ function releaseSession(session: CodexBridgeSession): Promise<void> {
   if (session.releasePromise !== null) {
     return session.releasePromise;
   }
+  session.promptSuggestions.close();
   session.closing = true;
   if (sessionsByBbThreadId.get(session.bbThreadId) === session) {
     sessionsByBbThreadId.delete(session.bbThreadId);
@@ -612,6 +634,12 @@ function sendThreadDeltas(
   const outDeltas: ThreadDelta[] = [];
   for (const delta of deltas) {
     if (delta.kind === "input.accepted") {
+      if (delta.providerTurnId !== undefined) {
+        session.promptSuggestions.acceptInput(
+          delta.clientRequestId,
+          delta.providerTurnId,
+        );
+      }
       session.unopenedCompactionDispatches =
         session.unopenedCompactionDispatches.filter(
           (dispatch) => dispatch.clientRequestId !== delta.clientRequestId,
@@ -729,6 +757,7 @@ async function handleChildNotification(
   if (method === "turn/started") {
     const parsed = codexTurnNotificationPeekSchema.safeParse(params);
     if (parsed.success && parsed.data.threadId === session.codexThreadId) {
+      session.promptSuggestions.rootStarted(parsed.data.turn.id);
       markResponseOpenedTurnNativelyStarted(session, parsed.data.turn.id);
     }
   }
@@ -777,6 +806,17 @@ async function handleChildNotification(
     if (currentSession(bbThreadId, serial) !== session) return;
   }
   sendThreadDeltas(session, deltas);
+  if (method === "turn/completed") {
+    const parsed = z
+      .object({ threadId: z.string(), turn: codexTurnSchema })
+      .safeParse(params);
+    if (parsed.success && parsed.data.threadId === session.codexThreadId) {
+      session.promptSuggestions.rootCompleted(
+        parsed.data.turn.id,
+        parsed.data.turn.status === "completed" && !parsed.data.turn.error,
+      );
+    }
+  }
   for (const delta of deltas) {
     if (delta.kind === "provider.error" && delta.willRetry !== true) {
       emitTerminalAccountErrorHint(session, delta);
@@ -939,6 +979,7 @@ function handleChildExit(
   if (!session) {
     return;
   }
+  session.promptSuggestions.close();
   session.connection = null;
 
   const openTurnIds = [...session.openCodexTurnIds];
@@ -1028,6 +1069,7 @@ async function initializeChild(
 
 const codexThreadIdentityResultSchema = z
   .object({
+    model: z.string().optional(),
     thread: z
       .object({
         id: z.string().min(1),
@@ -1272,6 +1314,14 @@ async function constructThreadSession(
     previousChildExit: null,
     releasePromise: null,
     goalStatus: existing?.goalStatus ?? null,
+    promptSuggestions: new CodexPromptSuggestions({
+      configuration: args.options.promptSuggestions,
+      model: decoded.sessionOptions.model ?? null,
+      connection: () => session.connection,
+      threadId: () => session.codexThreadId,
+      isCurrent: () => currentSession(args.threadId, serial) === session,
+      emit: (delta) => sendThreadDeltas(session, [delta]),
+    }),
   };
   sessionsByBbThreadId.set(args.threadId, session);
   if (existing) {
@@ -1396,6 +1446,8 @@ async function constructThreadSession(
       method,
       params,
     );
+    if (result.model !== undefined)
+      session.promptSuggestions.setModel(result.model);
     const codexThreadId = result.thread.id;
     session.codexThreadId = codexThreadId;
     translator.activateThreadGitWritableRoots({
@@ -1466,7 +1518,7 @@ function registerResumableSession(session: CodexBridgeSession): void {
     return;
   }
   sessionSerialCounter += 1;
-  sessionsByBbThreadId.set(session.bbThreadId, {
+  const resumable: CodexBridgeSession = {
     bbThreadId: session.bbThreadId,
     codexThreadId: session.codexThreadId,
     serial: sessionSerialCounter,
@@ -1493,7 +1545,17 @@ function registerResumableSession(session: CodexBridgeSession): void {
     previousChildExit: null,
     releasePromise: null,
     goalStatus: session.goalStatus,
-  });
+    promptSuggestions: new CodexPromptSuggestions({
+      configuration: undefined,
+      model: null,
+      connection: () => resumable.connection,
+      threadId: () => resumable.codexThreadId,
+      isCurrent: () =>
+        currentSession(resumable.bbThreadId, resumable.serial) === resumable,
+      emit: (delta) => sendThreadDeltas(resumable, [delta]),
+    }),
+  };
+  sessionsByBbThreadId.set(session.bbThreadId, resumable);
 }
 
 async function rebuildThreadSession(
@@ -1586,6 +1648,7 @@ function handleInitialize(id: string | number): void {
     protocolVersion: PROVIDER_BRIDGE_PROTOCOL_VERSION,
     capabilities: {
       sessionRestore: true,
+      promptSuggestions: true,
       threadArchive: true,
       threadRename: true,
       threadGoalClear: true,
@@ -1754,6 +1817,9 @@ function settleAcceptedDispatch(args: {
   }
   const codexTurnId = parsed.data.turn.id;
   const turnAlreadyOpen = live.openCodexTurnIds.has(codexTurnId);
+  if (!turnAlreadyOpen && parsed.data.turn.status === "inProgress") {
+    live.promptSuggestions.rootStarted(codexTurnId);
+  }
   sendThreadDeltas(
     live,
     live.translator.openTurnFromStartResponse({
@@ -1763,6 +1829,12 @@ function settleAcceptedDispatch(args: {
       turnAlreadyOpen,
     }),
   );
+  if (parsed.data.turn.status !== "inProgress") {
+    live.promptSuggestions.rootCompleted(
+      codexTurnId,
+      parsed.data.turn.status === "completed" && !parsed.data.turn.error,
+    );
+  }
   if (
     !turnAlreadyOpen &&
     live.openCodexTurnIds.has(codexTurnId) &&
@@ -1990,13 +2062,34 @@ async function handleTurnStart(
   id: string | number,
   params: TurnStartParamsShape,
 ): Promise<void> {
-  let live: LiveSessionForTurn;
+  const initial = sessionsByBbThreadId.get(params.threadId);
+  const input = {
+    configuration: params.options.promptSuggestions,
+    model: params.options.model,
+    sourceRequestId: params.clientRequestId,
+    compaction: isStandaloneBuiltinCompactCommand(params.input),
+  };
+  initial?.promptSuggestions.beginInput(input);
+  let live: LiveSessionForTurn | null = null;
   try {
     live = await requireLiveSessionForTurn(params);
+    if (live.session !== initial)
+      live.session.promptSuggestions.beginInput(input);
+    await dispatchTurnStart(id, params, live);
   } catch (error) {
     rejectWithCodexError(id, error);
-    return;
+  } finally {
+    initial?.promptSuggestions.finishInput();
+    if (live !== null && live.session !== initial)
+      live.session.promptSuggestions.finishInput();
   }
+}
+
+async function dispatchTurnStart(
+  id: string | number,
+  params: TurnStartParamsShape,
+  live: LiveSessionForTurn,
+): Promise<void> {
   const { session, connection } = live;
   const codexThreadId = session.codexThreadId;
   if (codexThreadId === null) {
@@ -2137,6 +2230,12 @@ async function handleTurnSteer(
     );
     return;
   }
+  session.promptSuggestions.beginInput({
+    configuration: params.options.promptSuggestions,
+    model: params.options.model,
+    sourceRequestId: params.clientRequestId,
+    compaction: false,
+  });
   try {
     const decoded = decodeCodexOptions(params.options);
     const permissionSettings = toCodexPermissionSettings({
@@ -2191,6 +2290,8 @@ async function handleTurnSteer(
     sendResult(id, { threadId: params.threadId });
   } catch (error) {
     rejectWithCodexError(id, error);
+  } finally {
+    session.promptSuggestions.finishInput();
   }
 }
 
@@ -2199,6 +2300,12 @@ async function handleThreadStop(
   params: ThreadStopParamsShape,
 ): Promise<void> {
   const session = sessionsByBbThreadId.get(params.threadId);
+  if (session)
+    await session.promptSuggestions.cancel().catch((error: unknown) => {
+      process.stderr.write(
+        `Codex sample cancellation during session stop: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    });
 
   if (params.intent === "release") {
     if (session) {
@@ -2487,6 +2594,15 @@ async function handleThreadMaintenance(
     alreadyInRequestedState?: RegExp;
   },
 ): Promise<void> {
+  if (options?.releaseAfter) {
+    const session = sessionsByBbThreadId.get(params.threadId);
+    if (session)
+      await session.promptSuggestions.cancel().catch((error: unknown) => {
+        process.stderr.write(
+          `Codex sample cancellation during session maintenance: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      });
+  }
   const settle = async (): Promise<void> => {
     if (options?.releaseAfter) {
       const session = sessionsByBbThreadId.get(params.threadId);
@@ -2589,6 +2705,52 @@ async function handleSkillsConfigure(
   }
 }
 
+function requirePromptSuggestionSession(params: {
+  threadId: string;
+  providerThreadId: string;
+}): CodexBridgeSession {
+  const session = sessionsByBbThreadId.get(params.threadId);
+  if (
+    !session ||
+    session.closing ||
+    session.codexThreadId !== params.providerThreadId ||
+    session.connection === null ||
+    session.connection.exited
+  ) {
+    throw new Error(
+      "Codex prompt suggestions require the existing loaded provider session",
+    );
+  }
+  return session;
+}
+
+async function handlePromptSuggestionRequest(
+  id: string | number,
+  params: ExperimentalPromptSuggestionRequestParams,
+): Promise<void> {
+  const session = requirePromptSuggestionSession(params);
+  const text = await session.promptSuggestions.request(params);
+  sendResult(id, { sourceTurnId: params.sourceTurnId, text });
+}
+
+async function handlePromptSuggestionCancel(
+  id: string | number,
+  params: ExperimentalPromptSuggestionCancelParams,
+): Promise<void> {
+  const session = requirePromptSuggestionSession(params);
+  await session.promptSuggestions.cancel(params.requestId);
+  sendResult(id, {});
+}
+
+async function handlePromptSuggestionConfigure(
+  id: string | number,
+  params: ExperimentalPromptSuggestionConfigureParams,
+): Promise<void> {
+  const session = requirePromptSuggestionSession(params);
+  await session.promptSuggestions.configure(params.configuration);
+  sendResult(id, {});
+}
+
 async function handleRequest(
   request: CodexBridgeCommand & { id: string | number },
 ): Promise<void> {
@@ -2642,6 +2804,15 @@ async function handleRequest(
             }
           : {}),
       });
+      break;
+    case "thread/prompt-suggestion/request":
+      await handlePromptSuggestionRequest(request.id, request.params);
+      break;
+    case "thread/prompt-suggestion/cancel":
+      await handlePromptSuggestionCancel(request.id, request.params);
+      break;
+    case "thread/prompt-suggestion/configure":
+      await handlePromptSuggestionConfigure(request.id, request.params);
       break;
     case "turn/start":
       await handleTurnStart(request.id, request.params);
@@ -2744,6 +2915,7 @@ export const handleLine = createBridgeLineHandler({ handleParsedMessage });
 
 function killAllChildren(): void {
   for (const session of sessionsByBbThreadId.values()) {
+    session.promptSuggestions.close();
     session.closing = true;
     session.connection?.kill();
     session.connection = null;

@@ -45,6 +45,7 @@ export interface SdkSessionOptions {
   settings?: Options["settings"];
   extraArgs?: Options["extraArgs"];
   recordThreadId?: () => string;
+  promptSuggestions?: boolean;
 }
 
 export type ClaudeSdkReasoningEffort =
@@ -140,7 +141,7 @@ function spawnRecordedClaudeProcess(args: {
   return child as SpawnedProcess;
 }
 
-function buildSdkPermissionOptions(
+export function buildSdkPermissionOptions(
   args: BuildSdkPermissionOptionsArgs,
 ): SdkPermissionOptions {
   const permissionMode = args.permissionMode ?? "default";
@@ -264,6 +265,7 @@ export class SdkSession {
       includePartialMessages: true,
       settingSources: ["user", "project", "local"],
       persistSession: true,
+      promptSuggestions: this.options.promptSuggestions ?? false,
       env: this.options.env ?? process.env,
       stderr: onStderr,
       ...(this.options.mcpServers

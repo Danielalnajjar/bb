@@ -135,6 +135,10 @@ import { isModifierSubmitKeyEvent } from "./modifier-submit-key";
 import { composerSubmittingBlockedReason } from "./composer-submit-gate";
 
 import { ComposerSendMenu } from "./ComposerSendMenu";
+import {
+  PromptSuggestionControls,
+  useComposerPromptSuggestion,
+} from "./PromptSuggestions";
 
 const PROMPTBOX_MIN_HEIGHT = 68;
 const DEFAULT_MENTION_TRIGGER = "@";
@@ -2347,6 +2351,29 @@ export function PromptBoxInternal({
     composerMenu.open &&
     popupContribution !== null;
   const composerMenuOpen = popupOpen || showTypeaheadMenu;
+  const promptSuggestion = useComposerPromptSuggestion({
+    composer,
+    blocked:
+      composerInputLocked ||
+      isSubmitting ||
+      isRunning ||
+      showVoiceActionGroup ||
+      Boolean(pendingUploads?.length),
+    hidden: composerMenuOpen,
+  });
+  const handlePromptSuggestionKey = promptSuggestion.handleKey;
+
+  useLayoutEffect(() => {
+    if (!editor) return;
+    if (promptSuggestion.suggestion) {
+      editor.view.dom.setAttribute(
+        "aria-describedby",
+        promptSuggestion.descriptionId,
+      );
+    } else {
+      editor.view.dom.removeAttribute("aria-describedby");
+    }
+  }, [editor, promptSuggestion.descriptionId, promptSuggestion.suggestion]);
   const typeaheadMenuState: TypeaheadMenuState =
     activeTrigger?.kind === "command"
       ? {
@@ -3132,6 +3159,8 @@ export function PromptBoxInternal({
         }
       }
 
+      if (handlePromptSuggestionKey(event)) return true;
+
       if (event.key === "Escape") {
         if (onEscape) {
           onEscape();
@@ -3243,6 +3272,7 @@ export function PromptBoxInternal({
       onEscape,
       onModifierSubmit,
       postCompositionKeyDownEvents,
+      handlePromptSuggestionKey,
       resetHistorySession,
       selectedIndex,
       setPendingCommandSubmit,
@@ -3404,6 +3434,14 @@ export function PromptBoxInternal({
               minHeight={minHeight}
               layout={surface === "new-thread" ? "root-compose" : "thread"}
               resolveMentionLink={mentionResolveLink}
+              suggestion={
+                promptSuggestion.suggestion
+                  ? {
+                      text: promptSuggestion.suggestion.text,
+                      descriptionId: promptSuggestion.descriptionId,
+                    }
+                  : null
+              }
             />
           </div>
 
@@ -3461,6 +3499,14 @@ export function PromptBoxInternal({
                 {attachmentError ? (
                   <div className="mx-3 mb-1 mt-1 text-xs text-destructive">
                     {attachmentError}
+                  </div>
+                ) : null}
+                {promptSuggestion.state?.eligible && promptSuggestion.error ? (
+                  <div
+                    className="mx-3 mb-1 mt-1 text-xs text-muted-foreground"
+                    role="status"
+                  >
+                    {promptSuggestion.error}
                   </div>
                 ) : null}
               </div>
@@ -3525,6 +3571,18 @@ export function PromptBoxInternal({
                     onAction={applyPromptAction}
                   />
                   {executionControls}
+                  <PromptSuggestionControls
+                    controller={promptSuggestion}
+                    disabled={
+                      composerInputLocked ||
+                      isSubmitting ||
+                      isRunning ||
+                      showVoiceActionGroup
+                    }
+                    empty={
+                      isDraftEmpty(composer.draft) && !pendingUploads?.length
+                    }
+                  />
                 </div>
               ) : null}
               <div

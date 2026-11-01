@@ -1,3 +1,4 @@
+import { allThreadPromptSuggestionsQueryKeyPrefix } from "../queries/query-keys";
 import type { QueryKey } from "@tanstack/react-query";
 import type { Environment, Host } from "@bb/domain";
 import type {
@@ -109,6 +110,7 @@ export function refetchActiveRealtimeQueriesOnResume({
   for (const queryKey of [
     allThreadTimelineQueryKeyPrefix(),
     allThreadQueryKeyPrefix(),
+    allThreadPromptSuggestionsQueryKeyPrefix(),
     sidebarNavigationQueryKey(),
   ]) {
     void queryClient.refetchQueries(
@@ -225,6 +227,7 @@ function getServerReconnectInvalidationQueryKeys(): QueryKey[] {
     threadsQueryKey(),
     threadSearchQueryKeyPrefix(),
     allThreadQueryKeyPrefix(),
+    allThreadPromptSuggestionsQueryKeyPrefix(),
     allThreadDetailBootstrapQueryKeyPrefix(),
     allThreadTimelineQueryKeyPrefix(),
     allThreadConversationOutlineQueryKeyPrefix(),

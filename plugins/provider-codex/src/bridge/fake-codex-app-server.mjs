@@ -14,6 +14,8 @@ import { createInterface } from "node:readline";
 let threadCounter = 0;
 let turnCounter = 0;
 const openTurnIdsByThreadId = new Map();
+const pendingSamples = new Map();
+let sampleCounter = 0;
 const pendingStartTurnIdsByThreadId = new Map();
 let interruptAttempts = 0;
 const processInstanceId = `${process.pid}-${Date.now()}-${Math.random()}`;
@@ -408,7 +410,9 @@ function takeScriptedTurnIndex() {
 async function runScriptFileTurn(threadId) {
   const turn = scriptedTurns[takeScriptedTurnIndex()] ?? [];
   for (const entry of turn) {
-    const params = withThreadId(entry.params ?? {}, threadId);
+    const params = entry.preserveThreadId
+      ? entry.params
+      : withThreadId(entry.params ?? {}, threadId);
     if (entry.kind === "request") {
       await requestFromClient(entry.method, params);
       continue;
@@ -435,9 +439,42 @@ async function handleRequest(message) {
   const { id, method } = message;
   const params = message.params ?? {};
   if (requestLogPath !== null) {
-    appendFileSync(requestLogPath, `${JSON.stringify({ method, params })}\n`);
+    appendFileSync(
+      requestLogPath,
+      `${JSON.stringify({ method, params, ...(method === "thread/sample" ? { id } : {}) })}\n`,
+    );
   }
   switch (method) {
+    case "thread/turns/list":
+      respond(id, { data: script?.sourceTurns ?? [] });
+      return;
+    case "thread/sample": {
+      sampleCounter += 1;
+      const sample =
+        script?.samples?.[sampleCounter - 1] ?? script?.sample ?? {};
+      if (sample.error) {
+        respondError(id, sample.error.code, sample.error.message);
+        return;
+      }
+      const result = {
+        sourceTurnId: sample.sourceTurnId ?? params.expectedTurnId,
+        responseId: `response-sample-${sampleCounter}`,
+        text:
+          sample.text === undefined ? "Review the implementation" : sample.text,
+      };
+      if (sample.hold) pendingSamples.set(id, { result, sample });
+      else respond(id, result);
+      return;
+    }
+    case "thread/sample/cancel": {
+      const pending = pendingSamples.get(params.requestId);
+      if (pending && !pending.sample.ignoreCancel) {
+        pendingSamples.delete(params.requestId);
+        respondError(params.requestId, -32600, "sample canceled");
+      }
+      respond(id, {});
+      return;
+    }
     case "initialize":
       respond(id, {});
       return;
@@ -502,7 +539,10 @@ async function handleRequest(message) {
       threadCounter += 1;
       const threadId = `codex-fx-${processInstanceId}-${threadCounter}`;
       notify("thread/started", { thread: { id: threadId } });
-      respond(id, { thread: { id: threadId } });
+      respond(id, {
+        thread: { id: threadId },
+        model: params.model ?? "fake-model",
+      });
       if (script?.initialGoalStatus) {
         notify("thread/goal/updated", {
           threadId,
@@ -539,6 +579,7 @@ async function handleRequest(message) {
         replayLastTurnUsage(params.threadId);
       }
       respond(id, {
+        model: params.model ?? "fake-model",
         thread: {
           id: params.threadId,
           ...(script?.resumedDaybreakEnabled === undefined
@@ -574,7 +615,10 @@ async function handleRequest(message) {
       const threadId = replaysUsage
         ? `usage-replay-fork-${processInstanceId}-${threadCounter}`
         : `codex-fx-${processInstanceId}-fork-${threadCounter}`;
-      respond(id, { thread: { id: threadId } });
+      respond(id, {
+        thread: { id: threadId },
+        model: params.model ?? "fake-model",
+      });
 
       if (replaysUsage) {
         replayLastTurnUsage(threadId);
@@ -582,6 +626,12 @@ async function handleRequest(message) {
       return;
     }
     case "turn/start": {
+      for (const [sampleId, pending] of pendingSamples) {
+        if (pending.sample.completeOnNextTurn) {
+          pendingSamples.delete(sampleId);
+          respond(sampleId, pending.result);
+        }
+      }
       if (firstInputText(params.input) === ZERO_WORK_PROMPT_TEXT) {
         respond(id, {});
         return;
@@ -682,7 +732,8 @@ async function handleRequest(message) {
       return;
     }
     case "turn/steer":
-      respond(id, {});
+      if (script?.steerError) respondError(id, -32600, script.steerError);
+      else respond(id, {});
       return;
     case "turn/interrupt": {
       interruptAttempts += 1;

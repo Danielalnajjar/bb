@@ -108,6 +108,7 @@ function toBridgeWireOptions(
 ): Record<string, unknown> {
   const {
     model,
+    promptSuggestions,
     serviceTier,
     reasoningLevel,
     promptMode,
@@ -124,6 +125,7 @@ function toBridgeWireOptions(
     ...options.providerOptions,
   };
   return {
+    ...(promptSuggestions !== undefined ? { promptSuggestions } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(serviceTier !== undefined ? { serviceTier } : {}),
     ...(reasoningLevel !== undefined ? { reasoningLevel } : {}),
@@ -422,6 +424,16 @@ export function createBridgeProtocolAdapter(
               providerThreadId: command.providerThreadId,
             },
           });
+        case "thread/prompt-suggestion/request":
+        case "thread/prompt-suggestion/cancel":
+        case "thread/prompt-suggestion/configure": {
+          const { type, ...params } = command;
+          return gate("promptSuggestions", {
+            kind: "request",
+            method: type,
+            params,
+          });
+        }
         case "thread/goal/clear":
           return gate("threadGoalClear", {
             kind: "request",

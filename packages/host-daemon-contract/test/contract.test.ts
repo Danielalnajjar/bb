@@ -472,6 +472,9 @@ const SETTLED_RESPONSE_RESULT_FIXTURES: SettledResponseResultFixtures = {
   },
   "thread.stop": { providerCheckpointId: null },
   "thread.storage.delete": { providerCheckpointId: null },
+  "thread.promptSuggestion.request": { sourceTurnId: "bb-turn-1", text: null },
+  "thread.promptSuggestion.cancel": {},
+  "thread.promptSuggestion.configure": {},
   "thread.goal.clear": { cleared: true },
   "thread.plan.cancel": { cancelled: true },
   "thread.rename": {},
@@ -726,6 +729,8 @@ const INTENTIONAL_OPTIONAL_HOST_DAEMON_FIELDS: Record<string, string> = {
     "A selected model requests its reasoning choices without probing the whole catalog.",
   "hostDaemonCommandSchema.options.reasoningLevel":
     "Absent when the cached model catalog lists the model without this level; preserve the agent setting.",
+  "hostDaemonCommandSchema.options.promptSuggestions":
+    "Provider-neutral next-prompt configuration is absent for callers that do not use predictions; absence disables automatic generation.",
   "hostDaemonCommandSchema.options.promptMode":
     "thread runtime options carry a prompt mode only when the prompt entered one through the provider's declared composer action.",
   "hostDaemonCommandSchema.options.sessionOptions":
@@ -1060,7 +1065,7 @@ describe("host-daemon command schemas", () => {
   });
 
   it("uses the current host-daemon protocol version", () => {
-    expect(HOST_DAEMON_PROTOCOL_VERSION).toBe(258);
+    expect(HOST_DAEMON_PROTOCOL_VERSION).toBe(259);
     expect(HOST_ARTIFACT_MAX_BYTES).toBe(256 * 1024 * 1024);
   });
 
@@ -1078,7 +1083,8 @@ describe("host-daemon command schemas", () => {
     expect(contract.isCompatibleHostDaemonProtocolVersion(255)).toBe(false);
     expect(contract.isCompatibleHostDaemonProtocolVersion(256)).toBe(false);
     expect(contract.isCompatibleHostDaemonProtocolVersion(257)).toBe(false);
-    expect(contract.isCompatibleHostDaemonProtocolVersion(258)).toBe(true);
+    expect(contract.isCompatibleHostDaemonProtocolVersion(258)).toBe(false);
+    expect(contract.isCompatibleHostDaemonProtocolVersion(259)).toBe(true);
     expect(contract.hostDaemonSupportsConnectNext(246)).toBe(false);
     expect(contract.hostDaemonSupportsConnectNext(247)).toBe(true);
     expect(contract.hostDaemonSupportsDesktopBrokerProof(247)).toBe(false);

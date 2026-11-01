@@ -1,4 +1,9 @@
 import {
+  promptSuggestionConfigurationSchema,
+  promptSuggestionPromptSchema,
+  promptSuggestionRawTextSchema,
+} from "@bb/domain";
+import {
   desktopBrowserBrokerChallengeSchema,
   desktopBrowserBrokerProofSchema,
   desktopBrowserCommandSchemas,
@@ -371,6 +376,30 @@ const threadGoalClearCommandSchema = hostDaemonThreadTargetSchema
     options: runtimeThreadExecutionOptionsSchema,
     bridgeLaunch: hostDaemonBridgeLaunchSchema,
     resumeContext: turnResumeContextSchema,
+  })
+  .strict();
+
+const threadPromptSuggestionRequestCommandSchema = threadGoalClearCommandSchema
+  .omit({ type: true })
+  .extend({
+    type: z.literal("thread.promptSuggestion.request"),
+    requestId: z.string().min(1),
+    sourceTurnId: z.string().min(1),
+    prompt: promptSuggestionPromptSchema,
+  })
+  .strict();
+const threadPromptSuggestionConfigureCommandSchema =
+  threadGoalClearCommandSchema
+    .omit({ type: true })
+    .extend({
+      type: z.literal("thread.promptSuggestion.configure"),
+      configuration: promptSuggestionConfigurationSchema,
+    })
+    .strict();
+const threadPromptSuggestionCancelCommandSchema = hostDaemonThreadTargetSchema
+  .extend({
+    type: z.literal("thread.promptSuggestion.cancel"),
+    requestId: z.string().min(1),
   })
   .strict();
 
@@ -1456,6 +1485,36 @@ export const hostDaemonCommandRegistry = {
     flushEventsBeforeResult: true,
     envLane: "read",
   }),
+  "thread.promptSuggestion.request": defineHostDaemonCommandDescriptor({
+    type: "thread.promptSuggestion.request",
+    schema: threadPromptSuggestionRequestCommandSchema,
+    resultSchema: z.object({
+      sourceTurnId: z.string().min(1),
+      text: promptSuggestionRawTextSchema.nullable(),
+    }),
+    transport: "settled",
+    retryable: false,
+    flushEventsBeforeResult: false,
+    envLane: null,
+  }),
+  "thread.promptSuggestion.cancel": defineHostDaemonCommandDescriptor({
+    type: "thread.promptSuggestion.cancel",
+    schema: threadPromptSuggestionCancelCommandSchema,
+    resultSchema: z.object({}).strict(),
+    transport: "settled",
+    retryable: false,
+    flushEventsBeforeResult: false,
+    envLane: null,
+  }),
+  "thread.promptSuggestion.configure": defineHostDaemonCommandDescriptor({
+    type: "thread.promptSuggestion.configure",
+    schema: threadPromptSuggestionConfigureCommandSchema,
+    resultSchema: z.object({}).strict(),
+    transport: "settled",
+    retryable: false,
+    flushEventsBeforeResult: false,
+    envLane: null,
+  }),
   "thread.plan.cancel": defineHostDaemonCommandDescriptor({
     type: "thread.plan.cancel",
     schema: threadPlanCancelCommandSchema,
@@ -1954,7 +2013,9 @@ type HostDaemonRetryableOnlineRpcCommandSchema =
 type HostDaemonResultSchemaMapForTransport<
   Transport extends HostDaemonCommandTransport,
 > = {
-  [Descriptor in HostDaemonCommandDescriptorForTransport<Transport> as Descriptor["type"]]: Descriptor["resultSchema"];
+  [
+    Descriptor in HostDaemonCommandDescriptorForTransport<Transport> as Descriptor["type"]
+  ]: Descriptor["resultSchema"];
 };
 
 type HostDaemonCommandResultSchemaMap =

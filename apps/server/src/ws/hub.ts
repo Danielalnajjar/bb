@@ -97,7 +97,11 @@ function isThreadDetailOnlyChange(
 ): boolean {
   return (
     message.changes.length > 0 &&
-    message.changes.every((change) => change === "history-compacted")
+    message.changes.every(
+      (change) =>
+        change === "history-compacted" ||
+        change === "prompt-suggestion-changed",
+    )
   );
 }
 

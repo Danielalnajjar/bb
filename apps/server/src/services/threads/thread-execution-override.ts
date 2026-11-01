@@ -1,3 +1,4 @@
+import { invalidatePromptSuggestion } from "./prompt-suggestions.js";
 import {
   getProjectExecutionDefaults,
   getThreadExecutionOverride,
@@ -140,6 +141,7 @@ export async function applyThreadExecutionOverride(
     fallbackModel: resolveFallbackModel(deps, thread),
   });
 
+  invalidatePromptSuggestion(deps, thread.id);
   setThreadExecutionOverride(deps.db, {
     threadId: thread.id,
     modelOverride: next.modelOverride,

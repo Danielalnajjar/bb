@@ -541,3 +541,5 @@ export type {
   DiffViewedFileRecord,
   DiffViewedFileScope,
 } from "./diff-viewed-files.js";
+
+export * from "./prompt-suggestions.js";

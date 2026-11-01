@@ -1,3 +1,8 @@
+import {
+  invalidatePromptSuggestion,
+  receivePromptSuggestion,
+  synchronizePromptSuggestionEligibility,
+} from "../services/threads/prompt-suggestions.js";
 import { performance } from "node:perf_hooks";
 import { Buffer } from "node:buffer";
 import { and, desc, eq, gt, lt, sql } from "drizzle-orm";
@@ -283,6 +288,7 @@ function resolveProviderIdentifiers(event: HostDaemonEventEnvelope["event"]): {
   providerThreadId: string | null;
 } {
   switch (event.type) {
+    case "thread/promptSuggestion/updated":
     case "thread/started":
     case "client/thread/start":
     case "client/turn/requested":
@@ -1154,8 +1160,17 @@ export function registerInternalEventRoutes(app: Hono, deps: AppDeps): void {
           hostId: session.hostId,
           events,
         });
+      const suggestionEntries = ownedEntries.filter(
+        (entry) =>
+          entry.envelope.event.type === "thread/promptSuggestion/updated",
+      );
       const { entries, droppedLifecycleEvents } =
-        dropInteractionLifecycleEvents(ownedEntries);
+        dropInteractionLifecycleEvents(
+          ownedEntries.filter(
+            (entry) =>
+              entry.envelope.event.type !== "thread/promptSuggestion/updated",
+          ),
+        );
       if (droppedLifecycleEvents.length > 0) {
         deps.logger.warn(
           {
@@ -1265,10 +1280,37 @@ export function registerInternalEventRoutes(app: Hono, deps: AppDeps): void {
         maybePruneActiveThreadEventHistory(deps, candidate);
       }
 
+      for (const envelope of postableEvents) {
+        if (
+          envelope.event.type === "turn/input/accepted" ||
+          envelope.event.type === "turn/started" ||
+          envelope.event.type === "thread/compacted" ||
+          envelope.event.type === "thread/context/cleared"
+        ) {
+          invalidatePromptSuggestion(deps, envelope.threadId);
+        }
+      }
+      for (const envelope of postableEvents) {
+        if (envelope.event.type === "turn/completed") {
+          await synchronizePromptSuggestionEligibility(deps, envelope.threadId);
+        }
+      }
+      for (const entry of suggestionEntries) {
+        const event = entry.envelope.event;
+        if (event.type === "thread/promptSuggestion/updated")
+          await receivePromptSuggestion(deps, event);
+      }
       deferEventFollowUpBatch(deps, followUps);
       const response: HostDaemonEventBatchResponse = {
-        acceptedEvents: appendResult.acceptedEvents.map(
-          (acceptedEvent, acceptedIndex) => {
+        acceptedEvents: [
+          ...suggestionEntries.map((entry) => ({
+            eventIndex: entry.eventIndex,
+            threadId: entry.envelope.threadId,
+            sequence: getLatestThreadSequence(deps.db, {
+              threadId: entry.envelope.threadId,
+            }),
+          })),
+          ...appendResult.acceptedEvents.map((acceptedEvent, acceptedIndex) => {
             const inputIndex = appendResult.insertedInputIndexes[acceptedIndex];
             if (inputIndex === undefined) {
               throw new Error(
@@ -1284,8 +1326,8 @@ export function registerInternalEventRoutes(app: Hono, deps: AppDeps): void {
               sequence: acceptedEvent.sequence,
               threadId: acceptedEvent.threadId,
             };
-          },
-        ),
+          }),
+        ],
         rejectedEvents,
       };
       const body = JSON.stringify(response);

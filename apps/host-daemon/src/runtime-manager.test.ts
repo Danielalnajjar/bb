@@ -187,6 +187,14 @@ function createFakeRuntime() {
     stopThread: vi.fn(async (_args: StopThreadArgs) => ({
       providerCheckpointId: null,
     })),
+    requestPromptSuggestion: vi.fn(
+      async ({ sourceTurnId }: { sourceTurnId: string }) => ({
+        sourceTurnId,
+        text: null,
+      }),
+    ),
+    cancelPromptSuggestion: vi.fn(async () => undefined),
+    configurePromptSuggestions: vi.fn(async () => undefined),
     clearThreadGoal: vi.fn(async () => ({ cleared: true })),
     renameThread: vi.fn(async (_args: RenameThreadArgs) => undefined),
     archiveThread: vi.fn(async () => undefined),

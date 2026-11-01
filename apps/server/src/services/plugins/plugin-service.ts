@@ -2272,6 +2272,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     },
 
     async resolveAgentConfiguration({ context, skillIdsByPlugin }) {
+      let promptSuggestions = true;
       const allTools = collectAgentTools();
       const tools: PluginAgentToolContribution[] = [];
       const selectedSkillIdsByPlugin = new Map<string, ReadonlySet<string>>();
@@ -2332,10 +2333,12 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
           }),
         );
         if (!outcome.ok) {
+          promptSuggestions = false;
           selectedSkillIdsByPlugin.set(pluginId, new Set());
           continue;
         }
 
+        promptSuggestions &&= outcome.value.promptSuggestions;
         const selectedTools = new Set(outcome.value.toolIds);
         const parameterOverrides = outcome.value.toolParameterOverrides;
         tools.push(
@@ -2358,7 +2361,12 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
         }
       }
 
-      return { tools, selectedSkillIdsByPlugin, dynamicInstructions };
+      return {
+        tools,
+        selectedSkillIdsByPlugin,
+        dynamicInstructions,
+        promptSuggestions,
+      };
     },
 
     async resolveProviderEnv({ providerId, context }) {

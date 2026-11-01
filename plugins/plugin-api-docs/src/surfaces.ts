@@ -998,6 +998,38 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
     ],
     surfaces: [
       {
+        id: "prompt-suggestions",
+        title: "Next-prompt suggestions",
+        experimental: true,
+        summary:
+          "Read and control the same transient suggestion state used by the composer and CLI.",
+        bullets: [
+          "threads.experimental_promptSuggestions.get/configure/request/dismiss return mode, override, eligibility, completed source turn, text and pending state",
+          "Only the mode override persists; accepting text is an editable unsent draft action, never a send",
+          "PluginAgentConfiguration.experimental_promptSuggestions: false disables generation restrictively for managed worker membership",
+          "Codex and Claude provider bridges receive server-authored prediction configuration and canonical source request IDs; raw results are decoded by the server",
+          "The first-party composer reads existing thread invalidation with internal_DO_NOT_USE_usePromptSuggestions; other plugins use the SDK action group",
+        ],
+        apiSymbols: [
+          "threads.experimental_promptSuggestions",
+          "PromptSuggestionMode",
+          "PromptSuggestionState",
+          "PluginAgentConfiguration.experimental_promptSuggestions",
+          "internal_DO_NOT_USE_usePromptSuggestions",
+          "experimental_promptSuggestionRequestParamsSchema",
+          "experimental_promptSuggestionRequestResultSchema",
+          "experimental_promptSuggestionCancelParamsSchema",
+          "experimental_promptSuggestionConfigureParamsSchema",
+          "experimental_promptSuggestionConfigurationSchema",
+          "ExperimentalPromptSuggestionRequestParams",
+          "ExperimentalPromptSuggestionRequestResult",
+          "ExperimentalPromptSuggestionCancelParams",
+          "ExperimentalPromptSuggestionConfigureParams",
+          "ExperimentalPromptSuggestionConfiguration",
+        ],
+        firstParty: ["composer", "provider-codex", "provider-claude-code"],
+      },
+      {
         id: "cli",
         tagline: "Your own `bb <name>` command",
         title: "bb CLI commands",

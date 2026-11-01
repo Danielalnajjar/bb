@@ -33,6 +33,7 @@ export function ComposerEditorSlot({
   minHeight,
   layout,
   resolveMentionLink,
+  suggestion = null,
 }: {
   editor: Editor | null;
   scrollContainerRef: RefObject<HTMLDivElement | null>;
@@ -41,6 +42,7 @@ export function ComposerEditorSlot({
   minHeight: number;
   layout: ComposerEditorLayout;
   resolveMentionLink: PromptMentionLinkResolver | undefined;
+  suggestion?: { text: string; descriptionId: string } | null;
 }) {
   return (
     <div
@@ -62,30 +64,52 @@ export function ComposerEditorSlot({
       }}
     >
       <PromptMentionLinkContext.Provider value={resolveMentionLink ?? null}>
-        <EditorContent
-          editor={editor}
-          onKeyDown={(event) => {
-            if (event.key !== "Escape") return;
-            if (editor === null || editor.isEditable) return;
-            event.preventDefault();
-            blurPromptEditor(editor);
-          }}
-          data-promptbox-editor-content=""
-          data-promptbox-compact-content={isCompactLayout ? "" : undefined}
-          className={cn(
-            "h-full min-h-full",
-            isCompactLayout && "flex items-center",
-            "[&_.ProseMirror]:min-h-full [&_.ProseMirror]:leading-[1.7] [&_.ProseMirror]:outline-none",
-            "[&_.ProseMirror_p]:m-0",
-            "[&_.ProseMirror_blockquote]:my-1 [&_.ProseMirror_blockquote]:border-l-2 [&_.ProseMirror_blockquote]:border-surface-selected-border [&_.ProseMirror_blockquote]:pl-3 [&_.ProseMirror_blockquote]:text-muted-foreground",
-            "[&_.ProseMirror_p.is-editor-empty:first-child::before]:pointer-events-none",
-            "[&_.ProseMirror_p.is-editor-empty:first-child::before]:float-left",
-            "[&_.ProseMirror_p.is-editor-empty:first-child::before]:h-0",
-            "[&_.ProseMirror_p.is-editor-empty:first-child::before]:text-subtle-foreground",
-            "[&_.ProseMirror_p.is-editor-empty:first-child::before]:font-light",
-            "[&_.ProseMirror_p.is-editor-empty:first-child::before]:opacity-70",
-          )}
-        />
+        <div className="grid min-h-full min-w-0 grid-cols-[minmax(0,1fr)]">
+          <EditorContent
+            editor={editor}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape") return;
+              if (editor === null || editor.isEditable) return;
+              event.preventDefault();
+              blurPromptEditor(editor);
+            }}
+            data-promptbox-editor-content=""
+            data-promptbox-compact-content={isCompactLayout ? "" : undefined}
+            className={cn(
+              "col-start-1 row-start-1 h-full min-h-full min-w-0",
+              isCompactLayout && "flex items-center",
+              "[&_.ProseMirror]:min-h-full [&_.ProseMirror]:leading-[1.7] [&_.ProseMirror]:outline-none",
+              "[&_.ProseMirror_p]:m-0",
+              "[&_.ProseMirror_blockquote]:my-1 [&_.ProseMirror_blockquote]:border-l-2 [&_.ProseMirror_blockquote]:border-surface-selected-border [&_.ProseMirror_blockquote]:pl-3 [&_.ProseMirror_blockquote]:text-muted-foreground",
+              "[&_.ProseMirror_p.is-editor-empty:first-child::before]:pointer-events-none",
+              "[&_.ProseMirror_p.is-editor-empty:first-child::before]:float-left",
+              "[&_.ProseMirror_p.is-editor-empty:first-child::before]:h-0",
+              "[&_.ProseMirror_p.is-editor-empty:first-child::before]:text-subtle-foreground",
+              "[&_.ProseMirror_p.is-editor-empty:first-child::before]:font-light",
+              "[&_.ProseMirror_p.is-editor-empty:first-child::before]:opacity-70",
+              suggestion &&
+                "[&_.ProseMirror_p.is-editor-empty:first-child::before]:hidden",
+            )}
+          />
+          {suggestion ? (
+            <>
+              <div
+                aria-hidden="true"
+                data-promptbox-suggestion=""
+                className={cn(
+                  "pointer-events-none col-start-1 row-start-1 min-w-0 whitespace-pre-wrap break-words font-light leading-[1.7] text-subtle-foreground opacity-70",
+                  isCompactLayout && "self-center truncate whitespace-nowrap",
+                )}
+              >
+                {suggestion.text}
+              </div>
+              <span id={suggestion.descriptionId} className="sr-only">
+                Suggested next prompt: {suggestion.text}. Press Tab or right
+                arrow to use it as an editable draft. It will not be sent.
+              </span>
+            </>
+          ) : null}
+        </div>
       </PromptMentionLinkContext.Provider>
     </div>
   );

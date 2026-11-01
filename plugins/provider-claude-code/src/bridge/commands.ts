@@ -1,5 +1,10 @@
 import {
   dynamicToolSchema,
+  BRIDGE_REQUEST_METHODS,
+  experimental_promptSuggestionConfigurationSchema,
+  experimental_promptSuggestionRequestParamsSchema,
+  experimental_promptSuggestionCancelParamsSchema,
+  experimental_promptSuggestionConfigureParamsSchema,
   initializeParamsSchema,
   instructionModeValues,
   permissionEscalationValues,
@@ -50,6 +55,8 @@ export const claudeThreadStartParamsSchema = z.object({
   permissionScope: bridgePermissionScopeSchema,
   permissionEscalation: bridgePermissionEscalationSchema,
   config: z.record(z.string(), z.unknown()).optional(),
+  promptSuggestions:
+    experimental_promptSuggestionConfigurationSchema.optional(),
   model: z.string().optional(),
   reasoningLevel: reasoningLevelSchema.optional(),
   serviceTier: z.enum(["default", "fast"]),
@@ -82,6 +89,8 @@ export const claudeTurnStartParamsSchema = z.object({
   threadId: z.string(),
   providerThreadId: z.string().nullable(),
   input: z.array(z.unknown()),
+  promptSuggestions:
+    experimental_promptSuggestionConfigurationSchema.optional(),
   model: z.string().optional(),
   reasoningLevel: reasoningLevelSchema.optional(),
   serviceTier: z.enum(["default", "fast"]).optional(),
@@ -106,6 +115,18 @@ export const claudeTurnSteerParamsSchema = claudeTurnStartParamsSchema
   .extend({ expectedTurnId: z.string() });
 
 const claudeCodeCommandSchema = z.discriminatedUnion("method", [
+  z.object({
+    method: z.literal(BRIDGE_REQUEST_METHODS.threadPromptSuggestionRequest),
+    params: experimental_promptSuggestionRequestParamsSchema,
+  }),
+  z.object({
+    method: z.literal(BRIDGE_REQUEST_METHODS.threadPromptSuggestionCancel),
+    params: experimental_promptSuggestionCancelParamsSchema,
+  }),
+  z.object({
+    method: z.literal(BRIDGE_REQUEST_METHODS.threadPromptSuggestionConfigure),
+    params: experimental_promptSuggestionConfigureParamsSchema,
+  }),
   z.object({
     method: z.literal("initialize"),
     params: initializeParamsSchema,

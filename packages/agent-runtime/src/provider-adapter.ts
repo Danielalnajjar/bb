@@ -1,5 +1,6 @@
 import type {
   ClientTurnRequestId,
+  PromptSuggestionConfiguration,
   DynamicTool,
   InstructionMode,
   JsonObject,
@@ -24,6 +25,7 @@ export interface CreateBridgeAdapterOptions {
 }
 
 export type ProviderExecutionContext = {
+  promptSuggestions?: PromptSuggestionConfiguration;
   model?: string;
   serviceTier?: ServiceTier;
   reasoningLevel?: ReasoningLevel;
@@ -35,6 +37,26 @@ export type ProviderExecutionContext = {
 } & RuntimePermissionPolicy;
 
 export type AdapterCommand =
+  | {
+      type: "thread/prompt-suggestion/request";
+      threadId: string;
+      providerThreadId: string;
+      requestId: string;
+      sourceTurnId: string;
+      prompt: string;
+    }
+  | {
+      type: "thread/prompt-suggestion/cancel";
+      threadId: string;
+      providerThreadId: string;
+      requestId: string;
+    }
+  | {
+      type: "thread/prompt-suggestion/configure";
+      threadId: string;
+      providerThreadId: string;
+      configuration: PromptSuggestionConfiguration;
+    }
   | {
       type: "skills/configure";
       skillRoots: readonly AgentRuntimeSkillRoot[];

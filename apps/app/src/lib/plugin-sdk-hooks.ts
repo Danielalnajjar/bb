@@ -1,3 +1,7 @@
+import { useSdk } from "./plugin-navigation-hooks";
+import { threadPromptSuggestionQueryKey } from "@/hooks/queries/query-keys";
+import type { PromptSuggestionState } from "@bb/domain";
+import { useThreadDetailRealtimeSubscription } from "@/hooks/useRealtimeSubscription";
 import { experimental_PluginRpcCallError } from "@get-bb/plugin-sdk";
 import {
   createRpcQueryHooks,
@@ -842,3 +846,20 @@ export const {
 } = createRpcQueryHooks(() =>
   rpcQueryHostFor(useContext(PluginContext), useQueryClient()),
 );
+
+export function internal_DO_NOT_USE_usePromptSuggestions({
+  threadId,
+}: {
+  threadId: string | null;
+}): PromptSuggestionState | null {
+  const sdk = useSdk();
+  useThreadDetailRealtimeSubscription(threadId);
+  const query = useQuery({
+    queryKey: threadPromptSuggestionQueryKey(threadId),
+    queryFn: () =>
+      sdk.threads.experimental_promptSuggestions.get({ threadId: threadId! }),
+    enabled: threadId !== null,
+    staleTime: 0,
+  });
+  return threadId === null ? null : (query.data ?? null);
+}

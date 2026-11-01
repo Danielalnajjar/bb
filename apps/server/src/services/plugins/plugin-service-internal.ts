@@ -182,6 +182,7 @@ export interface PluginInstructionContribution {
 }
 
 export interface PluginResolvedAgentConfiguration {
+  promptSuggestions: boolean;
   tools: PluginAgentToolContribution[];
   selectedSkillIdsByPlugin: ReadonlyMap<string, ReadonlySet<string>>;
   dynamicInstructions: Array<{ pluginId: string; text: string }>;

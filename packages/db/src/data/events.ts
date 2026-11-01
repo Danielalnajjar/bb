@@ -454,6 +454,8 @@ function insertStoredEventRow(
   db: DbQueryConnection,
   args: InsertStoredEventRowArgs,
 ): InsertStoredEventRowResult {
+  if (args.type === "thread/promptSuggestion/updated")
+    throw new Error("Prompt suggestions are transient and cannot be persisted");
   const id = createEventId();
   const prepared = prepareCompletedEventOutputData({
     createdAt: args.createdAt,

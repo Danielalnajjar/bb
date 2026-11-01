@@ -3,6 +3,11 @@
 import { experimental_selectedSkillMentions as selectedSkillMentions } from "@get-bb/plugin-sdk/provider-bridge";
 import { ClaudeContextUsageCollector } from "./context-usage.js";
 import { readIsolatedClaudeContextUsage } from "./context-usage-probe.js";
+import {
+  promptSuggestionText,
+  requestClaudePromptSuggestion,
+} from "./prompt-suggestion.js";
+import { claudeModelFallbackSystemMessageSchema } from "../schemas.js";
 
 import {
   type PendingInteractionGrantedPermissionProfile,
@@ -12,6 +17,10 @@ import {
   type ServiceTier,
   type ThreadDelta,
   BRIDGE_INBOUND_REQUEST_METHODS,
+  BRIDGE_REQUEST_METHODS,
+  type ExperimentalPromptSuggestionConfiguration,
+  type ExperimentalPromptSuggestionRequestParams,
+  type ExperimentalPromptSuggestionConfigureParams,
   BRIDGE_JSON_RPC_ERRORS,
   BRIDGE_NOTIFICATION_METHODS,
   PROVIDER_BRIDGE_PROTOCOL_VERSION,
@@ -249,6 +258,17 @@ interface ClaudeSessionRestart {
 }
 
 interface ThreadSession {
+  pendingInputs: number;
+  turnOpen: boolean;
+  automaticSuggestionsAtStartup: boolean;
+  modelChangedByProvider: boolean;
+  nativeSuggestionPending: boolean;
+  acceptedSourceRequestId: string | null;
+  completedSuggestionSource: {
+    sourceRequestId: string;
+    model: string;
+    epoch: number;
+  } | null;
   commandListGeneration: number;
   contextUsageCollector: ClaudeContextUsageCollector;
   session: SdkSession;
@@ -271,6 +291,10 @@ interface ThreadSession {
 }
 
 interface ThreadAttachment {
+  promptSuggestions: ExperimentalPromptSuggestionConfiguration | undefined;
+  suggestionEpoch: number;
+  sourceSucceeded: boolean | null;
+  pendingSuggestion: { requestId: string; controller: AbortController } | null;
   envSignature: string;
   sessionConstructionConfig: SessionConstructionConfig;
   sessionOptions: SdkSessionOptions;
@@ -287,6 +311,7 @@ interface ThreadAttachment {
 }
 
 interface CreateThreadAttachmentArgs {
+  promptSuggestions: ExperimentalPromptSuggestionConfiguration | undefined;
   permissionEscalation: PermissionEscalation | null;
   permissionMode: ClaudePermissionMode;
   liveSettings: ClaudeLiveSessionSettings;
@@ -674,6 +699,7 @@ async function closeThreadSession(args: {
     return;
   }
 
+  invalidatePromptSuggestion(attachment);
   attachment.closing = true;
   const threadSession = attachment.residentSession;
   if (threadSession) {
@@ -828,8 +854,10 @@ async function applyLiveSessionSettings(
 ): Promise<void> {
   const current = threadSession.attachment.liveSettings;
   if (current.model !== next.model) {
+    invalidatePromptSuggestion(threadSession.attachment);
     threadSession.contextUsageCollector.invalidateCapacity();
     await threadSession.session.setModel(next.model);
+    threadSession.modelChangedByProvider = false;
     seedModelContextWindowHint(threadSession, threadId, next.model);
   }
 
@@ -1122,6 +1150,10 @@ function createThreadAttachment(
   args: CreateThreadAttachmentArgs,
 ): ThreadAttachment {
   const attachment: ThreadAttachment = {
+    promptSuggestions: args.promptSuggestions,
+    suggestionEpoch: 0,
+    sourceSucceeded: null,
+    pendingSuggestion: null,
     envSignature: environmentSignature(
       readConfigEnvOverrides(args.sessionConstructionConfig.config),
     ),
@@ -1171,6 +1203,14 @@ function createThreadSession(attachment: ThreadAttachment): ThreadSession {
     })),
   );
   const threadSession: ThreadSession = {
+    pendingInputs: 0,
+    turnOpen: false,
+    automaticSuggestionsAtStartup:
+      attachment.sessionOptions.promptSuggestions ?? false,
+    modelChangedByProvider: false,
+    nativeSuggestionPending: false,
+    acceptedSourceRequestId: null,
+    completedSuggestionSource: null,
     commandListGeneration: 0,
     contextUsageCollector: new ClaudeContextUsageCollector(),
     session,
@@ -1444,6 +1484,8 @@ function buildTrackedSessionOptions(
     },
     env,
   );
+  sessionOptions.promptSuggestions =
+    params.promptSuggestions?.automatic ?? false;
   sessionOptions.permissionMode = params.permissionMode;
   const disallowedTools = subagentDisallowedTools(
     params.providerSubagentsEnabled ?? true,
@@ -1457,6 +1499,7 @@ function buildTrackedSessionOptions(
 }
 
 function replaceThreadSession(args: ReplaceThreadSessionArgs): ThreadSession {
+  invalidatePromptSuggestion(args.attachment);
   args.threadSession.closing = true;
   resolvePendingSessionWork(args.threadSession, args.restart.reason);
   emitSessionReplacement({
@@ -1557,6 +1600,182 @@ function getCurrentThreadSession(
   return threadSession;
 }
 
+function invalidatePromptSuggestion(attachment: ThreadAttachment): void {
+  attachment.suggestionEpoch += 1;
+  const pending = attachment.pendingSuggestion;
+  attachment.pendingSuggestion = null;
+  pending?.controller.abort();
+  if (attachment.residentSession) {
+    attachment.residentSession.completedSuggestionSource = null;
+  }
+}
+
+function applyPromptSuggestionConfiguration(
+  attachment: ThreadAttachment,
+  configuration: ExperimentalPromptSuggestionConfiguration | undefined,
+): void {
+  if (isDeepStrictEqual(attachment.promptSuggestions, configuration)) return;
+  const automaticChanged =
+    (attachment.promptSuggestions?.automatic ?? false) !==
+    (configuration?.automatic ?? false);
+  invalidatePromptSuggestion(attachment);
+  attachment.promptSuggestions = configuration;
+  attachment.sessionOptions.promptSuggestions =
+    configuration?.automatic ?? false;
+  const threadSession = attachment.residentSession;
+  if (!automaticChanged || !threadSession) return;
+  const restart = {
+    reason: "Prompt suggestion mode changed",
+    showRuntimeNote: false,
+  };
+  if (threadSession.turnOpen || threadSession.pendingInputs > 0) return;
+  replaceThreadSessionBeforeNextTurn({
+    attachment,
+    threadSession,
+    threadId: attachment.threadIdRef.current,
+    restart,
+  });
+}
+
+function configurePromptSuggestions(
+  params: ExperimentalPromptSuggestionConfigureParams,
+): void {
+  const attachment = threadAttachments.get(params.threadId);
+  if (
+    !attachment ||
+    attachment.closing ||
+    attachment.providerThreadId !== params.providerThreadId
+  ) {
+    throw new Error("No matching Claude session for prompt suggestions");
+  }
+  if (
+    (attachment.residentSession?.turnOpen ||
+      (attachment.residentSession?.pendingInputs ?? 0) > 0) &&
+    (attachment.promptSuggestions?.automatic ?? false) !==
+      params.configuration.automatic
+  ) {
+    throw new Error(
+      "Claude turn is running; retry prompt suggestion configuration after the turn",
+    );
+  }
+  applyPromptSuggestionConfiguration(attachment, params.configuration);
+}
+
+const nativePromptSuggestionSchema = z.object({
+  type: z.literal("prompt_suggestion"),
+  suggestion: z.string(),
+  session_id: z.string(),
+});
+
+function handleNativePromptSuggestion(
+  threadSession: ThreadSession,
+  message: SDKMessage,
+): boolean {
+  if (message.type !== "prompt_suggestion") return false;
+  const parsed = nativePromptSuggestionSchema.safeParse(message);
+  const attachment = threadSession.attachment;
+  const source = threadSession.completedSuggestionSource;
+  const configuration = attachment.promptSuggestions;
+  if (
+    parsed.success &&
+    parsed.data.session_id === attachment.providerThreadId
+  ) {
+    threadSession.nativeSuggestionPending = false;
+  }
+  if (
+    !parsed.success ||
+    parsed.data.session_id !== attachment.providerThreadId ||
+    !configuration?.automatic ||
+    threadSession.turnOpen ||
+    threadSession.pendingInputs > 0 ||
+    !source ||
+    source.epoch !== attachment.suggestionEpoch ||
+    source.sourceRequestId !== configuration.sourceRequestId ||
+    source.model !== attachment.liveSettings.model
+  )
+    return true;
+  threadSession.completedSuggestionSource = null;
+  sendThreadDeltas(attachment.threadIdRef.current, [
+    {
+      kind: "prompt.suggestion",
+      sourceRequestId: source.sourceRequestId,
+      model: source.model,
+      text: promptSuggestionText(parsed.data.suggestion),
+    },
+  ]);
+  return true;
+}
+
+async function handlePromptSuggestionRequest(
+  params: ExperimentalPromptSuggestionRequestParams,
+) {
+  const empty = { sourceTurnId: params.sourceTurnId, text: null };
+  const attachment = threadAttachments.get(params.threadId);
+  const threadSession = attachment?.residentSession;
+  const configuration = attachment?.promptSuggestions;
+  const model = attachment?.liveSettings.model;
+  if (
+    !attachment ||
+    attachment.closing ||
+    !threadSession ||
+    threadSession.closing ||
+    threadSession.streamEnded ||
+    threadSession.turnOpen ||
+    threadSession.pendingInputs > 0 ||
+    threadSession.modelChangedByProvider ||
+    !configuration ||
+    !configuration.sourceRequestId ||
+    !model ||
+    attachment.sourceSucceeded === false ||
+    attachment.providerThreadId !== params.providerThreadId ||
+    attachment.pendingSuggestion ||
+    (threadSession.acceptedSourceRequestId !== null &&
+      threadSession.acceptedSourceRequestId !== configuration.sourceRequestId)
+  )
+    throw new Error("No eligible idle Claude session for prompt suggestions");
+  const sourceRequestId = configuration.sourceRequestId;
+  const epoch = attachment.suggestionEpoch;
+  const controller = new AbortController();
+  const pending = { requestId: params.requestId, controller };
+  attachment.pendingSuggestion = pending;
+  try {
+    const text = await requestClaudePromptSuggestion({
+      sessionOptions: { ...attachment.sessionOptions },
+      providerSessionId: params.providerThreadId,
+      model,
+      dynamicTools: attachment.sessionConstructionConfig.dynamicTools ?? [],
+      prompt: params.prompt,
+      signal: controller.signal,
+    });
+    if (
+      threadSession.streamEnded &&
+      !attachment.closing &&
+      attachment.promptSuggestions?.sourceRequestId === sourceRequestId &&
+      attachment.liveSettings.model === model
+    )
+      throw new Error("Claude session ended during prompt suggestion request");
+    if (
+      controller.signal.aborted ||
+      attachment.pendingSuggestion !== pending ||
+      attachment.suggestionEpoch !== epoch ||
+      getCurrentThreadSession({
+        threadId: params.threadId,
+        sessionSerial: threadSession.sessionSerial,
+      }) !== threadSession ||
+      threadSession.turnOpen ||
+      threadSession.pendingInputs > 0 ||
+      attachment.liveSettings.model !== model ||
+      attachment.providerThreadId !== params.providerThreadId ||
+      attachment.promptSuggestions?.sourceRequestId !== sourceRequestId
+    )
+      return empty;
+    return { sourceTurnId: params.sourceTurnId, text };
+  } finally {
+    if (attachment.pendingSuggestion === pending)
+      attachment.pendingSuggestion = null;
+  }
+}
+
 function publishProviderCommands(
   threadSession: ThreadSession,
   commands: unknown,
@@ -1606,6 +1825,48 @@ function createOnSdkMessage(
       threadId: args.threadIdRef.current,
     });
     if (!threadSession) return;
+    if (handleNativePromptSuggestion(threadSession, message)) return;
+    if (
+      (message.type === "assistant" || message.type === "stream_event") &&
+      message.parent_tool_use_id === null &&
+      !threadSession.turnOpen
+    ) {
+      invalidatePromptSuggestion(threadSession.attachment);
+      threadSession.turnOpen = true;
+      threadSession.acceptedSourceRequestId = null;
+      threadSession.attachment.sourceSucceeded = false;
+    }
+    if (
+      message.type === "system" &&
+      claudeModelFallbackSystemMessageSchema.safeParse(message).success
+    ) {
+      invalidatePromptSuggestion(threadSession.attachment);
+      threadSession.modelChangedByProvider = true;
+    }
+    if (message.type === "result") {
+      threadSession.turnOpen = false;
+      const sourceRequestId = threadSession.acceptedSourceRequestId;
+      const model = threadSession.attachment.liveSettings.model;
+      const succeeded =
+        message.subtype === "success" &&
+        !message.is_error &&
+        !threadSession.modelChangedByProvider;
+      threadSession.attachment.sourceSucceeded = succeeded;
+      threadSession.nativeSuggestionPending =
+        succeeded && threadSession.automaticSuggestionsAtStartup;
+      threadSession.completedSuggestionSource =
+        succeeded &&
+        sourceRequestId &&
+        model &&
+        threadSession.automaticSuggestionsAtStartup &&
+        threadSession.attachment.promptSuggestions?.automatic
+          ? {
+              sourceRequestId,
+              model,
+              epoch: threadSession.attachment.suggestionEpoch,
+            }
+          : null;
+    }
     if (
       message.type === "assistant" ||
       message.type === "user" ||
@@ -1618,6 +1879,7 @@ function createOnSdkMessage(
       providerThreadId.length > 0 &&
       threadSession.attachment.providerThreadId !== providerThreadId
     ) {
+      invalidatePromptSuggestion(threadSession.attachment);
       threadSession.attachment.providerThreadId = providerThreadId;
       sendThreadIdentity(args.threadIdRef.current, providerThreadId);
     }
@@ -1697,6 +1959,32 @@ function createOnSdkMessage(
         });
       }
     }
+    if (
+      message.type === "result" &&
+      threadSession.automaticSuggestionsAtStartup !==
+        (threadSession.attachment.promptSuggestions?.automatic ?? false)
+    ) {
+      queueMicrotask(() => {
+        if (
+          getCurrentThreadSession({
+            sessionSerial: args.sessionSerial,
+            threadId: args.threadIdRef.current,
+          }) !== threadSession ||
+          threadSession.turnOpen ||
+          threadSession.pendingInputs > 0
+        )
+          return;
+        replaceThreadSessionBeforeNextTurn({
+          attachment: threadSession.attachment,
+          threadSession,
+          threadId: args.threadIdRef.current,
+          restart: {
+            reason: "Prompt suggestion mode changed",
+            showRuntimeNote: false,
+          },
+        });
+      });
+    }
     const recoveryKind = getAssistantMessageRecoveryKind(message);
     if (recoveryKind !== null) {
       emitTerminalAccountErrorHint(
@@ -1719,6 +2007,8 @@ function createOnSdkDone(
     });
     if (!threadSession) return;
 
+    invalidatePromptSuggestion(threadSession.attachment);
+    threadSession.turnOpen = false;
     threadSession.streamEnded = true;
     resolvePendingSessionWork(
       threadSession,
@@ -2265,6 +2555,7 @@ async function handleRequest(request: ClaudeCodeJsonRpcRequest): Promise<void> {
         protocolVersion: PROVIDER_BRIDGE_PROTOCOL_VERSION,
         capabilities: {
           sessionRestore: true,
+          promptSuggestions: true,
           threadArchive: false,
           threadRename: false,
           threadGoalClear: false,
@@ -2364,6 +2655,27 @@ async function handleRequest(request: ClaudeCodeJsonRpcRequest): Promise<void> {
     case "turn/steer":
       await handleTurnSteer(request.id, request.params);
       break;
+    case BRIDGE_REQUEST_METHODS.threadPromptSuggestionRequest:
+      sendResult(
+        request.id,
+        await handlePromptSuggestionRequest(request.params),
+      );
+      break;
+    case BRIDGE_REQUEST_METHODS.threadPromptSuggestionCancel: {
+      const attachment = threadAttachments.get(request.params.threadId);
+      if (
+        attachment?.providerThreadId === request.params.providerThreadId &&
+        attachment.pendingSuggestion?.requestId === request.params.requestId
+      ) {
+        invalidatePromptSuggestion(attachment);
+      }
+      sendResult(request.id, {});
+      break;
+    }
+    case BRIDGE_REQUEST_METHODS.threadPromptSuggestionConfigure:
+      configurePromptSuggestions(request.params);
+      sendResult(request.id, {});
+      break;
     case "thread/stop":
       await handleThreadStop(request.id, request.params);
       break;
@@ -2400,6 +2712,7 @@ function attachThreadSession(
   }
 
   const attachment = createThreadAttachment({
+    promptSuggestions: params.promptSuggestions,
     liveSettings: toInitialLiveSessionSettings(params),
     permissionEscalation: params.permissionEscalation,
     permissionMode: params.permissionMode,
@@ -2409,6 +2722,7 @@ function attachThreadSession(
     sessionOptions,
     threadIdRef,
   });
+  attachment.sourceSucceeded = resume ? null : false;
   threadAttachments.set(params.threadId, attachment);
   startResidentThreadSession(attachment, resume ? providerThreadId : undefined);
 
@@ -2463,9 +2777,20 @@ async function handleThreadResume(
     )
   ) {
     const liveSettings = toInitialLiveSessionSettings(params);
-    if (existingSession) {
+    if (
+      (existingSession?.turnOpen ||
+        (existingSession?.pendingInputs ?? 0) > 0) &&
+      (existing.promptSuggestions?.automatic ?? false) !==
+        (params.promptSuggestions?.automatic ?? false)
+    ) {
+      throw new Error(
+        "Claude turn is running; retry prompt suggestion configuration after the turn",
+      );
+    }
+    applyPromptSuggestionConfiguration(existing, params.promptSuggestions);
+    if (existing.residentSession) {
       await applyLiveSessionSettings(
-        existingSession,
+        existing.residentSession,
         params.threadId,
         liveSettings,
       );
@@ -2569,6 +2894,19 @@ async function runTurnInput(
 
   const attachment = threadAttachments.get(params.threadId);
   if (attachment) {
+    const resident = attachment.residentSession;
+    if (
+      resident?.nativeSuggestionPending &&
+      !resident.turnOpen &&
+      resident.pendingInputs === 0
+    ) {
+      resident.restartBeforeNextTurn = {
+        reason: "Unfinished native prompt suggestion invalidated by new input",
+        showRuntimeNote: false,
+      };
+    }
+    invalidatePromptSuggestion(attachment);
+    applyPromptSuggestionConfiguration(attachment, params.promptSuggestions);
     if ("config" in params) {
       applyTurnEnvironment(attachment, params.config);
     }
@@ -2604,6 +2942,8 @@ async function runTurnInput(
     sendError(id, -32000, "Claude SDK input stream is closed");
     return;
   }
+  invalidatePromptSuggestion(threadSession.attachment);
+  threadSession.pendingInputs += 1;
   try {
     await applyLiveSessionSettings(
       threadSession,
@@ -2615,23 +2955,31 @@ async function runTurnInput(
     );
     await enterPlanModeIfRequested(threadSession, params);
   } catch (error) {
+    threadSession.pendingInputs -= 1;
     const message = error instanceof Error ? error.message : String(error);
     sendError(id, -32000, message);
     return;
   }
 
   try {
+    threadSession.acceptedSourceRequestId = null;
+    threadSession.attachment.sourceSucceeded = false;
     await pushPromptInput(
       threadSession,
       promptText,
       params.permissionEscalation,
     );
+    threadSession.turnOpen = true;
+    threadSession.acceptedSourceRequestId = acceptance.clientRequestId;
+    threadSession.attachment.sourceSucceeded = false;
     emitCanonicalTurnInputAccepted(threadSession, acceptance, params.threadId);
     threadSession.attachment.permissionEscalation = params.permissionEscalation;
     sendResult(id, { threadId: params.threadId });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     sendError(id, -32000, message);
+  } finally {
+    threadSession.pendingInputs -= 1;
   }
 }
 

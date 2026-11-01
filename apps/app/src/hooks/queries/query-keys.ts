@@ -1164,3 +1164,10 @@ export function systemProviderCatalogQueryKey() {
 export function pluginUpdateJobsQueryKey() {
   return ["plugin-update-jobs"] as const;
 }
+
+export function threadPromptSuggestionQueryKey(threadId: string | null) {
+  return ["threadPromptSuggestion", threadId] as const;
+}
+export function allThreadPromptSuggestionsQueryKeyPrefix() {
+  return ["threadPromptSuggestion"] as const;
+}

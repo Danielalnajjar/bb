@@ -12,6 +12,7 @@ import {
 } from "./thread.js";
 
 export const THREAD_CHANGE_KINDS = [
+  "prompt-suggestion-changed",
   "thread-created",
   "thread-deleted",
   "events-appended",

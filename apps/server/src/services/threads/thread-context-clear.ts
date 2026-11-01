@@ -1,3 +1,4 @@
+import { invalidatePromptSuggestion } from "./prompt-suggestions.js";
 import { createEventId, getThread } from "@bb/db";
 import {
   THREAD_CONTEXT_CLEAR_OPERATION,
@@ -8,7 +9,7 @@ import {
 } from "@bb/domain";
 import { ApiError } from "../../errors.js";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
-import { withThreadContextClearGuard } from "./thread-context-mutation-guard.js";
+import { withThreadExclusiveGuard } from "./thread-context-mutation-guard.js";
 import { appendThreadEvent } from "./thread-events.js";
 import { stopThreadForCurrentState } from "./thread-lifecycle.js";
 import { buildThreadStatusChangeMetadata } from "./thread-runtime-display.js";
@@ -21,7 +22,7 @@ export async function clearThreadContext(
     thread: Thread;
   },
 ): Promise<void> {
-  await withThreadContextClearGuard(args.thread.id, async () => {
+  await withThreadExclusiveGuard(args.thread.id, async () => {
     const thread = getThread(deps.db, args.thread.id);
     if (!thread) {
       throw new ApiError(404, "invalid_request", "Thread not found");
@@ -46,6 +47,7 @@ export async function clearThreadContext(
       );
     }
 
+    invalidatePromptSuggestion(deps, thread.id);
     await stopThreadForCurrentState(deps, thread, args.environment);
     const releasedThread = getThread(deps.db, thread.id);
     if (

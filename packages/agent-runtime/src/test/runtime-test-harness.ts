@@ -43,6 +43,8 @@ export const scriptedEchoBridgeModulePath = join(
 );
 
 export interface ScriptedEchoLaunchScript {
+  promptSuggestionWaitForCancel?: boolean;
+  promptSuggestionLateCancelError?: boolean;
   startDelayMs?: number;
   turnStartResponseDelayMs?: number;
   answerStartWithoutIdentity?: boolean;

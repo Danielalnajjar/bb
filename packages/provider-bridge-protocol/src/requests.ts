@@ -3,6 +3,9 @@ import {
   dynamicToolSchema,
   instructionModeSchema,
   promptInputSchema,
+  promptSuggestionConfigurationSchema,
+  promptSuggestionPromptSchema,
+  promptSuggestionRawTextSchema,
   threadProviderCommandsStateSchema,
 } from "@bb/domain";
 import { z } from "zod";
@@ -25,6 +28,9 @@ export const BRIDGE_REQUEST_METHODS = {
   threadArchive: "thread/archive",
   threadUnarchive: "thread/unarchive",
   threadGoalClear: "thread/goal/clear",
+  threadPromptSuggestionRequest: "thread/prompt-suggestion/request",
+  threadPromptSuggestionCancel: "thread/prompt-suggestion/cancel",
+  threadPromptSuggestionConfigure: "thread/prompt-suggestion/configure",
   turnStart: "turn/start",
   turnSteer: "turn/steer",
   skillsConfigure: "skills/configure",
@@ -151,3 +157,35 @@ export const threadIdentityResultSchema = z
     sessionRestorable: z.boolean().optional(),
   })
   .passthrough();
+
+export const promptSuggestionCancelParamsSchema = z.object({
+  threadId: z.string().min(1),
+  providerThreadId: z.string().min(1),
+  requestId: z.string().min(1),
+});
+export const promptSuggestionRequestParamsSchema =
+  promptSuggestionCancelParamsSchema.extend({
+    sourceTurnId: z.string().min(1),
+    prompt: promptSuggestionPromptSchema,
+  });
+export const promptSuggestionRequestResultSchema = z.object({
+  sourceTurnId: z.string().min(1),
+  text: promptSuggestionRawTextSchema.nullable(),
+});
+export const promptSuggestionConfigureParamsSchema = z.object({
+  threadId: z.string().min(1),
+  providerThreadId: z.string().min(1),
+  configuration: promptSuggestionConfigurationSchema,
+});
+export type PromptSuggestionRequestParams = z.infer<
+  typeof promptSuggestionRequestParamsSchema
+>;
+export type PromptSuggestionRequestResult = z.infer<
+  typeof promptSuggestionRequestResultSchema
+>;
+export type PromptSuggestionCancelParams = z.infer<
+  typeof promptSuggestionCancelParamsSchema
+>;
+export type PromptSuggestionConfigureParams = z.infer<
+  typeof promptSuggestionConfigureParamsSchema
+>;

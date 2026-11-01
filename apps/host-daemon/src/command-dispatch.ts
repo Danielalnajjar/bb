@@ -427,6 +427,37 @@ const commandHandlers: CommandHandlerMap = {
     await deleteThreadStorage(command, options);
     return result;
   },
+  "thread.promptSuggestion.request": async (command, options) => {
+    const entry = await ensureThreadRuntime(command, options);
+    return entry.runtime.requestPromptSuggestion({
+      threadId: command.threadId,
+      requestId: command.requestId,
+      sourceTurnId: command.sourceTurnId,
+      prompt: command.prompt,
+      options: command.options,
+    });
+  },
+  "thread.promptSuggestion.configure": async (command, options) => {
+    const entry = await ensureThreadRuntime(command, options);
+    await entry.runtime.configurePromptSuggestions({
+      threadId: command.threadId,
+      configuration: command.configuration,
+    });
+    return {};
+  },
+  "thread.promptSuggestion.cancel": async (command, options) => {
+    await Promise.all(
+      options.runtimeManager
+        .listThreadOwnerEntries(command.threadId)
+        .map((entry) =>
+          entry.runtime.cancelPromptSuggestion({
+            threadId: command.threadId,
+            requestId: command.requestId,
+          }),
+        ),
+    );
+    return {};
+  },
   "thread.goal.clear": async (command, options) => {
     const entry = await ensureThreadRuntime(command, options);
     const result = await entry.runtime.clearThreadGoal({

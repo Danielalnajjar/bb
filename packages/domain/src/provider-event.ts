@@ -1,3 +1,4 @@
+import { promptSuggestionRawTextSchema } from "./prompt-suggestion.js";
 import { contextSnapshotSchema } from "./context-snapshot.js";
 import { z } from "zod";
 import {
@@ -483,6 +484,13 @@ function itemTextDeltaEventSchema<TType extends string>(type: TType) {
 }
 
 const unscopedProviderEventSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("thread/promptSuggestion/updated"),
+    threadId: z.string(),
+    sourceRequestId: z.string().min(1),
+    model: z.string().min(1),
+    text: promptSuggestionRawTextSchema.nullable(),
+  }),
   z.object({
     type: z.literal("thread/started"),
     threadId: z.string(),

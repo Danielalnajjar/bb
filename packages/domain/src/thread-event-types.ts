@@ -18,6 +18,7 @@ export const systemEventTypeValues = [
 ] as const;
 
 const providerEventTypeValues = [
+  "thread/promptSuggestion/updated",
   "thread/started",
   "thread/identity",
   "turn/started",

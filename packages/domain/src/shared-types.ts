@@ -1,3 +1,4 @@
+import { promptSuggestionConfigurationSchema } from "./prompt-suggestion.js";
 import { z } from "zod";
 import { jsonObjectSchema } from "./json-value.js";
 
@@ -576,6 +577,7 @@ export type SessionOptionSelections = z.infer<
 >;
 
 const runtimeThreadExecutionBaseOptionsSchema = z.object({
+  promptSuggestions: promptSuggestionConfigurationSchema.optional(),
   model: z.string().min(1),
   serviceTier: serviceTierSchema,
   reasoningLevel: reasoningLevelSchema.optional(),

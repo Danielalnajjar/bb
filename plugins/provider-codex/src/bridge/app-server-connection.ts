@@ -45,6 +45,7 @@ interface CreateCodexAppServerConnectionOptions {
 }
 
 interface CodexAppServerRequestArgs<TResult> {
+  requestId?: string;
   method: string;
   params?: unknown;
   resultSchema: z.ZodType<TResult>;
@@ -130,7 +131,7 @@ export function createCodexAppServerConnection(
     threadId: options.recordThreadId,
   });
 
-  const pending = new Map<number, PendingChildRequest>();
+  const pending = new Map<string | number, PendingChildRequest>();
   const stderrChunks: string[] = [];
   let nextRequestId = 1;
   let finalized = false;
@@ -267,12 +268,12 @@ export function createCodexAppServerConnection(
         (typeof id === "string" || typeof id === "number") &&
         message.method === undefined
       ) {
-        const numericId = typeof id === "number" ? id : Number(id);
-        const request = pending.get(numericId);
+        const requestId = pending.has(id) ? id : Number(id);
+        const request = pending.get(requestId);
         if (!request) {
           return;
         }
-        pending.delete(numericId);
+        pending.delete(requestId);
         if (request.timeout !== null) {
           clearTimeout(request.timeout);
         }
@@ -359,7 +360,7 @@ export function createCodexAppServerConnection(
       return finalized || stdinFailure !== null;
     },
 
-    request({ method, params, resultSchema, timeoutMs }) {
+    request({ requestId, method, params, resultSchema, timeoutMs }) {
       if (finalized || killStarted) {
         return Promise.reject(
           new CodexAppServerExitedError("codex app-server is not running", {
@@ -370,8 +371,11 @@ export function createCodexAppServerConnection(
       if (stdinFailure !== null) {
         return Promise.reject(stdinFailure);
       }
-      const id = nextRequestId;
+      const id = requestId ?? nextRequestId;
       nextRequestId += 1;
+      if (pending.has(id)) {
+        return Promise.reject(new Error(`Duplicate codex request ID: ${id}`));
+      }
       return new Promise((resolve, reject) => {
         const entry: PendingChildRequest = {
           resolve: (value) => {

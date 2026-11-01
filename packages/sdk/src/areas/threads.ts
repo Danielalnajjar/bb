@@ -1,3 +1,4 @@
+import type { PromptSuggestionMode, PromptSuggestionState } from "@bb/domain";
 import {
   type PromptInput,
   type PendingInteraction,
@@ -608,6 +609,18 @@ export interface ThreadQueueArea {
 }
 
 export interface ThreadsArea {
+  experimental_promptSuggestions: {
+    get(args: { threadId: string }): Promise<PromptSuggestionState>;
+    configure(args: {
+      threadId: string;
+      mode: PromptSuggestionMode | null;
+    }): Promise<PromptSuggestionState>;
+    request(args: { threadId: string }): Promise<PromptSuggestionState>;
+    dismiss(args: {
+      threadId: string;
+      sourceTurnId: string;
+    }): Promise<PromptSuggestionState>;
+  };
   archive(args: ThreadActionArgs): Promise<ThreadArchiveResult>;
   archiveAll(args: ThreadActionArgs): Promise<ThreadArchiveAllResult>;
   childSummary(args: ThreadStatusArgs): Promise<ThreadChildSummaryResult>;
@@ -1603,6 +1616,38 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
         }),
       );
       return { ok: true };
+    },
+    experimental_promptSuggestions: {
+      async get(input) {
+        return transport.readJson(
+          transport.api.v1.threads[":id"]["prompt-suggestion"].$get({
+            param: { id: input.threadId },
+          }),
+        );
+      },
+      async configure(input) {
+        return transport.readJson(
+          transport.api.v1.threads[":id"]["prompt-suggestion"].mode.$post({
+            param: { id: input.threadId },
+            json: { mode: input.mode },
+          }),
+        );
+      },
+      async request(input) {
+        return transport.readJson(
+          transport.api.v1.threads[":id"]["prompt-suggestion"].request.$post({
+            param: { id: input.threadId },
+          }),
+        );
+      },
+      async dismiss(input) {
+        return transport.readJson(
+          transport.api.v1.threads[":id"]["prompt-suggestion"].dismiss.$post({
+            param: { id: input.threadId },
+            json: { sourceTurnId: input.sourceTurnId },
+          }),
+        );
+      },
     },
     async clearGoal(input) {
       await transport.readVoid(

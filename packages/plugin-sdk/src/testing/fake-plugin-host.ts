@@ -492,6 +492,7 @@ export interface FakePluginBehaviorDrivers {
    * reaching the callback. Callback failures are logged and return empty
    * selections. */
   resolveAgentConfiguration(context: PluginAgentConfigurationContext): Promise<{
+    promptSuggestions: boolean;
     tools: FakeAgentToolRecord[];
     skills: string[];
     instructions: string | null;
@@ -2264,6 +2265,7 @@ function createFakePluginHostInternal(
     async resolveAgentConfiguration(context) {
       if (agentConfigurationProvider === null) {
         return {
+          promptSuggestions: true,
           tools: [...agentTools],
           skills: [...agentSkillIds],
           instructions: null,
@@ -2293,10 +2295,16 @@ function createFakePluginHostInternal(
             }),
           skills: normalized.skillIds,
           instructions: normalized.instructions,
+          promptSuggestions: normalized.promptSuggestions,
         };
       } catch (error) {
         emitLog("warn", `agent configure failed: ${errorMessage(error)}`);
-        return { tools: [], skills: [], instructions: null };
+        return {
+          tools: [],
+          skills: [],
+          instructions: null,
+          promptSuggestions: false,
+        };
       }
     },
 

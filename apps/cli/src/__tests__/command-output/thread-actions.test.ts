@@ -22,6 +22,89 @@ describe("bb thread action command output", () => {
   const register: CommandRegistrar = (program) =>
     registerThreadCommands(program, () => "http://server");
 
+  it("reads prompt suggestions without starting inference or submitting a message", async () => {
+    const get = vi.fn(async () => ({
+      mode: "button",
+      modeOverride: null,
+      eligible: true,
+      sourceTurnId: "turn-1",
+      text: null,
+      pending: false,
+    }));
+    const request = vi.fn();
+    const send = vi.fn();
+    stubServerApi({
+      "v1.threads.:id.prompt-suggestion.$get": get,
+      "v1.threads.:id.prompt-suggestion.request.$post": request,
+      "v1.threads.:id.messages.$post": send,
+    });
+    await runCommand(
+      ["thread", "prompt-suggestion", "get", "thread-1", "--json"],
+      register,
+    );
+    expect(get).toHaveBeenCalledWith({ param: { id: "thread-1" } });
+    expect(request).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("resets the mode through the shared SDK configure path with the current thread", async () => {
+    vi.stubEnv("BB_THREAD_ID", "thread-1");
+    const mode = vi.fn(async () => ({
+      mode: "automatic",
+      modeOverride: null,
+      eligible: true,
+      sourceTurnId: null,
+      text: null,
+      pending: false,
+    }));
+    stubServerApi({ "v1.threads.:id.prompt-suggestion.mode.$post": mode });
+    await runCommand(
+      ["thread", "prompt-suggestion", "mode", "default", "--self"],
+      register,
+    );
+    expect(mode).toHaveBeenCalledWith({
+      param: { id: "thread-1" },
+      json: { mode: null },
+    });
+  });
+
+  it("keeps a dismiss source turn distinct from the request action", async () => {
+    const result = {
+      mode: "button",
+      modeOverride: "button",
+      eligible: true,
+      sourceTurnId: "turn-1",
+      text: null,
+      pending: false,
+    };
+    const request = vi.fn(async () => result);
+    const dismiss = vi.fn(async () => result);
+    stubServerApi({
+      "v1.threads.:id.prompt-suggestion.request.$post": request,
+      "v1.threads.:id.prompt-suggestion.dismiss.$post": dismiss,
+    });
+    await runCommand(
+      ["thread", "prompt-suggestion", "request", "thread-1"],
+      register,
+    );
+    expect(request).toHaveBeenCalledWith({ param: { id: "thread-1" } });
+    await runCommand(
+      [
+        "thread",
+        "prompt-suggestion",
+        "dismiss",
+        "thread-1",
+        "--source-turn",
+        "turn-1",
+      ],
+      register,
+    );
+    expect(dismiss).toHaveBeenCalledWith({
+      param: { id: "thread-1" },
+      json: { sourceTurnId: "turn-1" },
+    });
+  });
+
   it("bb thread archive sends the thread id from args", async () => {
     const archivePost = vi.fn(async () => ({
       ok: true,

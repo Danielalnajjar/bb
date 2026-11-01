@@ -391,6 +391,7 @@ type ExpectedThemeKey = "catalog" | "get" | "resolve" | "set";
 type ExpectedThreadSectionsKey = "create" | "delete" | "list" | "update";
 
 type ExpectedThreadsKey =
+  | "experimental_promptSuggestions"
   | "experimental_listAncestors"
   | "experimental_listDescendants"
   | "experimental_listCascade"
@@ -610,6 +611,9 @@ describe("SDK public type entrypoints", () => {
     expectTypeOf<
       keyof RootBbSdk["threads"]
     >().toEqualTypeOf<ExpectedThreadsKey>();
+    expectTypeOf<
+      keyof RootBbSdk["threads"]["experimental_promptSuggestions"]
+    >().toEqualTypeOf<"get" | "configure" | "request" | "dismiss">();
     expectTypeOf<
       keyof RootBbSdk["threads"]["events"]
     >().toEqualTypeOf<ExpectedThreadEventsKey>();

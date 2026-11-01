@@ -363,3 +363,13 @@ export const experimental_getApplicationLinkApprovals = runtimeFunction(
 export const experimental_revokeApplicationLinkApproval = runtimeFunction(
   "experimental_revokeApplicationLinkApproval",
 );
+
+export const internal_DO_NOT_USE_usePromptSuggestions = runtimeFunction(
+  "internal_DO_NOT_USE_usePromptSuggestions",
+);
+
+export type {
+  PromptSuggestionMode,
+  PromptSuggestionState,
+  PromptSuggestionConfiguration,
+} from "@bb/domain";

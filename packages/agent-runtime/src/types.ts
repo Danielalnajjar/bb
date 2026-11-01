@@ -1,3 +1,4 @@
+import type { PromptSuggestionConfiguration } from "@bb/domain";
 import type {
   PermissionMode,
   AvailableModel,
@@ -305,6 +306,21 @@ interface ProviderInstallationStatusArgs extends ProviderMaintenanceArgs {
 }
 
 export interface AgentRuntime {
+  requestPromptSuggestion(args: {
+    threadId: string;
+    requestId: string;
+    sourceTurnId: string;
+    prompt: string;
+    options: AgentRuntimeExecutionOptions;
+  }): Promise<{ sourceTurnId: string; text: string | null }>;
+  cancelPromptSuggestion(args: {
+    threadId: string;
+    requestId: string;
+  }): Promise<void>;
+  configurePromptSuggestions(args: {
+    threadId: string;
+    configuration: PromptSuggestionConfiguration;
+  }): Promise<void>;
   ensureProvider(args: EnsureProviderArgs): Promise<void>;
 
   startThread(args: StartThreadArgs): Promise<StartThreadResult>;

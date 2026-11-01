@@ -108,6 +108,7 @@ interface ControlledClaudeQuery {
 }
 
 interface ClaudeQueryCallOptions {
+  promptSuggestions?: boolean;
   allowDangerouslySkipPermissions?: boolean;
   mcpServers?: BridgeSessionOptions["mcpServers"];
   canUseTool?: CanUseTool;
@@ -439,7 +440,10 @@ function createAuthenticationErrorMessage(sessionId: string): SDKMessage {
   };
 }
 
-function createSuccessfulResultMessage(sessionId: string): SDKMessage {
+function createSuccessfulResultMessage(
+  sessionId: string,
+  result = "ok",
+): SDKMessage {
   return {
     type: "result",
     subtype: "success",
@@ -447,7 +451,7 @@ function createSuccessfulResultMessage(sessionId: string): SDKMessage {
     duration_api_ms: 1,
     is_error: false,
     num_turns: 1,
-    result: "ok",
+    result,
     stop_reason: "end_turn",
     total_cost_usd: 0,
     usage: createResultUsage(),
@@ -727,6 +731,529 @@ describe("bridge", () => {
     vi.useRealTimers();
     for (const tempDir of tempDirs.splice(0)) {
       rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  async function predictionFixture(
+    args: {
+      automatic?: boolean;
+      model?: string;
+    } = {},
+  ) {
+    const bridge = createBridgeJsonRpcTestHarness(handleLine);
+    const queries: ControlledClaudeQuery[] = [];
+    const threadId = `prediction-${randomUUID()}`;
+    const configuration = {
+      automatic: args.automatic ?? false,
+      prompt: "Predict the next user prompt",
+      sourceRequestId: "creq_abcdefghjk",
+    };
+    const options = {
+      ...canonicalOptions(),
+      model: args.model ?? "claude-opus-5-5",
+      ...(args.automatic === undefined
+        ? {}
+        : { promptSuggestions: configuration }),
+    };
+    queryMock.mockImplementation(() => {
+      const query = createControlledClaudeQuery();
+      queries.push(query);
+      return query;
+    });
+    bridge.sendRequest(1, "thread/start", {
+      threadId,
+      cwd: "/tmp/worktree",
+      instructionMode: "append",
+      options,
+    });
+    const providerThreadId = getProviderThreadIdFromResult(
+      await bridge.waitForResponse(1),
+    );
+    return {
+      bridge,
+      queries,
+      threadId,
+      providerThreadId,
+      configuration,
+      options,
+      turn: async (requestId = 10, clientRequestId = "creq_abcdefghjk") => {
+        bridge.sendRequest(requestId, "turn/start", {
+          threadId,
+          providerThreadId,
+          clientRequestId,
+          input: [{ type: "text", text: "Finish the source task" }],
+          options,
+        });
+        await bridge.flushWork();
+        await readNextPrompt(getLatestQueryCall());
+        await bridge.waitForResponse(requestId);
+      },
+      complete: async () => {
+        queries.at(-1)?.emit(createSuccessfulResultMessage(providerThreadId));
+        await bridge.flushWork();
+      },
+      suggest: (query = queries.at(-1), suggestion = "Check the result") => {
+        query?.emit({
+          type: "prompt_suggestion",
+          suggestion,
+          uuid: "00000000-0000-4000-8000-000000000099",
+          session_id: providerThreadId,
+        });
+      },
+      events: () =>
+        assembleCapturedThreadEvents(bridge.messages, "claude-code").filter(
+          (event) => event.type === "thread/promptSuggestion/updated",
+        ),
+      close: async () => {
+        try {
+          queries.forEach((query) => query.finish());
+          await bridge.flushWork();
+          bridge.sendRequest(999, "thread/discard", {
+            threadId,
+            providerThreadId,
+          });
+          await bridge.waitForResponse(999);
+        } finally {
+          bridge.restore();
+        }
+      },
+    };
+  }
+
+  it.each(["claude-opus-5-5", "claude-fable-5-1"])(
+    "correlates native automatic suggestions with a successful accepted source on %s",
+    async (model) => {
+      const fixture = await predictionFixture({ automatic: true, model });
+      try {
+        expect(getLatestQueryOptions().promptSuggestions).toBe(true);
+        fixture.suggest();
+        await fixture.bridge.flushWork();
+        expect(fixture.events()).toEqual([]);
+        await fixture.turn();
+        fixture.suggest();
+        await fixture.bridge.flushWork();
+        expect(fixture.events()).toEqual([]);
+        await fixture.complete();
+        fixture.suggest();
+        await fixture.bridge.flushWork();
+        expect(fixture.events()).toMatchObject([
+          {
+            type: "thread/promptSuggestion/updated",
+            sourceRequestId: "creq_abcdefghjk",
+            model,
+            text: "Check the result",
+          },
+        ]);
+        fixture.suggest();
+        await fixture.bridge.flushWork();
+        expect(fixture.events()).toHaveLength(1);
+      } finally {
+        await fixture.close();
+      }
+    },
+  );
+
+  it.each([undefined, false])(
+    "does not generate or translate native suggestions with absent/Button configuration (%s)",
+    async (automatic) => {
+      const fixture = await predictionFixture({ automatic });
+      try {
+        expect(getLatestQueryOptions().promptSuggestions).toBe(false);
+        await fixture.turn();
+        await fixture.complete();
+        const before = [...fixture.bridge.messages];
+        fixture.suggest();
+        await fixture.bridge.flushWork();
+        expect(fixture.bridge.messages).toEqual(before);
+        if (automatic === undefined) {
+          fixture.bridge.sendRequest(30, "thread/prompt-suggestion/request", {
+            threadId: fixture.threadId,
+            providerThreadId: fixture.providerThreadId,
+            requestId: "prediction-request",
+            sourceTurnId: "canonical-source-turn",
+            prompt: "Predict",
+          });
+          expect(
+            (await fixture.bridge.waitForResponse(30)).error?.message,
+          ).toContain("No eligible idle Claude session");
+        }
+        expect(
+          contextQueryMock.mock.calls.filter(
+            ([call]) => typeof call.prompt === "string",
+          ),
+        ).toEqual([]);
+      } finally {
+        await fixture.close();
+      }
+    },
+  );
+
+  it.each(["failed", "fallback"])(
+    "suppresses suggestions after a %s source result",
+    async (kind) => {
+      const fixture = await predictionFixture({ automatic: true });
+      try {
+        await fixture.turn();
+        if (kind === "fallback") {
+          fixture.queries[0].emit({
+            type: "system",
+            subtype: "model_refusal_fallback",
+            trigger: "refusal",
+            direction: "retry",
+            original_model: "claude-opus-5-5",
+            fallback_model: "claude-fable-5-1",
+            request_id: null,
+            content: "Provider changed the source model",
+            uuid: "00000000-0000-4000-8000-000000000098",
+            session_id: fixture.providerThreadId,
+          });
+          await fixture.complete();
+        } else {
+          fixture.queries[0].emit(
+            createStaleResumeErrorMessage({
+              sessionId: fixture.providerThreadId,
+              missingSessionId: fixture.providerThreadId,
+            }),
+          );
+          await fixture.bridge.flushWork();
+        }
+        fixture.suggest();
+        await fixture.bridge.flushWork();
+        expect(fixture.events()).toEqual([]);
+        fixture.bridge.sendRequest(30, "thread/prompt-suggestion/request", {
+          threadId: fixture.threadId,
+          providerThreadId: fixture.providerThreadId,
+          requestId: "prediction-request",
+          sourceTurnId: "canonical-source-turn",
+          prompt: "Predict",
+        });
+        expect(
+          (await fixture.bridge.waitForResponse(30)).error?.message,
+        ).toContain("No eligible idle Claude session");
+      } finally {
+        await fixture.close();
+      }
+    },
+  );
+
+  it("restarts only at idle for automatic-state changes, preserving native identity and model", async () => {
+    const fixture = await predictionFixture({ automatic: true });
+    try {
+      await fixture.turn();
+      fixture.bridge.sendRequest(20, "thread/prompt-suggestion/configure", {
+        threadId: fixture.threadId,
+        providerThreadId: fixture.providerThreadId,
+        configuration: { ...fixture.configuration, automatic: false },
+      });
+      expect(
+        (await fixture.bridge.waitForResponse(20)).error?.message,
+      ).toContain("retry");
+      expect(fixture.queries[0].close).not.toHaveBeenCalled();
+      await fixture.complete();
+      fixture.bridge.sendRequest(21, "thread/prompt-suggestion/configure", {
+        threadId: fixture.threadId,
+        providerThreadId: fixture.providerThreadId,
+        configuration: { ...fixture.configuration, automatic: false },
+      });
+      expect((await fixture.bridge.waitForResponse(21)).result).toEqual({});
+      expect(getLatestQueryOptions()).toMatchObject({
+        resume: fixture.providerThreadId,
+        model: "claude-opus-5-5",
+        promptSuggestions: false,
+      });
+      expect(fixture.queries[0].close).toHaveBeenCalled();
+      fixture.suggest(fixture.queries[0], "Obsolete automatic text");
+      fixture.suggest();
+      await fixture.bridge.flushWork();
+      expect(fixture.events()).toEqual([]);
+      fixture.bridge.sendRequest(22, "thread/prompt-suggestion/configure", {
+        threadId: fixture.threadId,
+        providerThreadId: fixture.providerThreadId,
+        configuration: fixture.configuration,
+      });
+      await fixture.bridge.waitForResponse(22);
+      expect(getLatestQueryOptions()).toMatchObject({
+        resume: fixture.providerThreadId,
+        promptSuggestions: true,
+      });
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("rejects a native suggestion after its source changes without restarting for a source-only configuration update", async () => {
+    const fixture = await predictionFixture({ automatic: true });
+    try {
+      await fixture.turn();
+      await fixture.complete();
+      fixture.bridge.sendRequest(20, "thread/prompt-suggestion/configure", {
+        threadId: fixture.threadId,
+        providerThreadId: fixture.providerThreadId,
+        configuration: {
+          ...fixture.configuration,
+          sourceRequestId: "creq_abcdefghjm",
+        },
+      });
+      await fixture.bridge.waitForResponse(20);
+      fixture.suggest();
+      await fixture.bridge.flushWork();
+      expect(fixture.events()).toEqual([]);
+      expect(fixture.queries[0].close).not.toHaveBeenCalled();
+      expect(fixture.queries).toHaveLength(1);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("does not attribute an earlier result to a queued input before the SDK accepts it", async () => {
+    const fixture = await predictionFixture({ automatic: true });
+    try {
+      await fixture.turn();
+      fixture.options.promptSuggestions = {
+        ...fixture.configuration,
+        sourceRequestId: "creq_abcdefghjm",
+      };
+      fixture.bridge.sendRequest(11, "turn/start", {
+        threadId: fixture.threadId,
+        providerThreadId: fixture.providerThreadId,
+        clientRequestId: "creq_abcdefghjm",
+        input: [{ type: "text", text: "Queued input" }],
+        options: fixture.options,
+      });
+      await fixture.bridge.flushWork();
+      expect(fixture.bridge.hasResponse(11)).toBe(false);
+      await fixture.complete();
+      fixture.suggest();
+      await fixture.bridge.flushWork();
+      expect(fixture.events()).toEqual([]);
+      fixture.bridge.sendRequest(30, "thread/prompt-suggestion/request", {
+        threadId: fixture.threadId,
+        providerThreadId: fixture.providerThreadId,
+        requestId: "prediction-request",
+        sourceTurnId: "canonical-source-turn",
+        prompt: "Predict",
+      });
+      expect(
+        (await fixture.bridge.waitForResponse(30)).error?.message,
+      ).toContain("No eligible idle Claude session");
+      await readNextPrompt(getLatestQueryCall());
+      await fixture.bridge.waitForResponse(11);
+      await fixture.complete();
+      fixture.suggest();
+      await fixture.bridge.flushWork();
+      expect(fixture.events()).toMatchObject([
+        { sourceRequestId: "creq_abcdefghjm", text: "Check the result" },
+      ]);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("retires an unfinished native generation before accepting a later idle input", async () => {
+    const fixture = await predictionFixture({ automatic: true });
+    try {
+      await fixture.turn();
+      await fixture.complete();
+      fixture.options.promptSuggestions = {
+        ...fixture.configuration,
+        sourceRequestId: "creq_abcdefghjm",
+      };
+      await fixture.turn(11, "creq_abcdefghjm");
+      fixture.suggest(fixture.queries[0], "Late text for the old source");
+      await fixture.complete();
+      fixture.suggest();
+      await fixture.bridge.flushWork();
+      expect(fixture.queries[0].close).toHaveBeenCalled();
+      expect(fixture.events()).toMatchObject([
+        { sourceRequestId: "creq_abcdefghjm", text: "Check the result" },
+      ]);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it.each(["cancel", "source", "input", "discard", "ended"])(
+    "settles an in-flight Button request on %s and rejects its late output",
+    async (action) => {
+      const fixture = await predictionFixture({
+        automatic: false,
+        model: "claude-fable-5-1",
+      });
+      const sample = createControlledClaudeQuery();
+      contextQueryMock.mockImplementation((args: { prompt: unknown }) =>
+        typeof args.prompt === "string"
+          ? sample
+          : createControlledClaudeQuery(),
+      );
+      try {
+        await fixture.turn();
+        await fixture.complete();
+        fixture.bridge.sendRequest(30, "thread/prompt-suggestion/request", {
+          threadId: fixture.threadId,
+          providerThreadId: fixture.providerThreadId,
+          requestId: "prediction-request",
+          sourceTurnId: "canonical-source-turn",
+          prompt: "Predict",
+        });
+        await fixture.bridge.flushWork();
+        fixture.bridge.sendRequest(31, "thread/prompt-suggestion/request", {
+          threadId: fixture.threadId,
+          providerThreadId: fixture.providerThreadId,
+          requestId: "duplicate-request",
+          sourceTurnId: "canonical-source-turn",
+          prompt: "Predict",
+        });
+        expect(
+          (await fixture.bridge.waitForResponse(31)).error?.message,
+        ).toContain("No eligible idle Claude session");
+        if (action === "input") {
+          await fixture.turn(40, "creq_abcdefghjm");
+        } else if (action === "source") {
+          fixture.bridge.sendRequest(40, "thread/prompt-suggestion/configure", {
+            threadId: fixture.threadId,
+            providerThreadId: fixture.providerThreadId,
+            configuration: {
+              ...fixture.configuration,
+              sourceRequestId: "creq_abcdefghjm",
+            },
+          });
+          await fixture.bridge.waitForResponse(40);
+        } else if (action === "ended") {
+          fixture.queries.forEach((query) => query.finish());
+          await fixture.bridge.flushWork();
+        } else if (action === "discard") {
+          fixture.queries.forEach((query) => query.finish());
+          fixture.bridge.sendRequest(40, "thread/discard", {
+            threadId: fixture.threadId,
+            providerThreadId: fixture.providerThreadId,
+          });
+          await fixture.bridge.waitForResponse(40);
+        } else {
+          fixture.bridge.sendRequest(40, "thread/prompt-suggestion/cancel", {
+            threadId: fixture.threadId,
+            providerThreadId: fixture.providerThreadId,
+            requestId: "prediction-request",
+          });
+          await fixture.bridge.waitForResponse(40);
+        }
+        sample.emit(createSuccessfulResultMessage("fork"));
+        const response = await fixture.bridge.waitForResponse(30);
+        if (action === "ended") {
+          expect(response.error?.message).toContain(
+            "Claude session ended during prompt suggestion request",
+          );
+          expect(response.result).toBeUndefined();
+        } else {
+          expect(response.result).toEqual({
+            sourceTurnId: "canonical-source-turn",
+            text: null,
+          });
+        }
+        expect(sample.close).toHaveBeenCalled();
+      } finally {
+        sample.finish();
+        await fixture.close();
+      }
+    },
+  );
+
+  it.each(["missing", "ended"])(
+    "returns a failure for a %s resident session instead of successful abstention",
+    async (kind) => {
+      const fixture = await predictionFixture({ automatic: false });
+      try {
+        await fixture.turn();
+        await fixture.complete();
+        if (kind === "ended") {
+          fixture.queries[0].finish();
+          await fixture.bridge.flushWork();
+        }
+        fixture.bridge.sendRequest(30, "thread/prompt-suggestion/request", {
+          threadId: kind === "missing" ? "missing-thread" : fixture.threadId,
+          providerThreadId: fixture.providerThreadId,
+          requestId: "prediction-request",
+          sourceTurnId: "canonical-source-turn",
+          prompt: "Predict",
+        });
+        const response = await fixture.bridge.waitForResponse(30);
+        expect(response.error?.message).toContain(
+          "No eligible idle Claude session",
+        );
+        expect(response.result).toBeUndefined();
+      } finally {
+        await fixture.close();
+      }
+    },
+  );
+
+  it("returns unexpected prediction stream failures through the bridge error response", async () => {
+    const fixture = await predictionFixture({ automatic: false });
+    const sample = createControlledClaudeQuery();
+    contextQueryMock.mockImplementation((args: { prompt: unknown }) =>
+      typeof args.prompt === "string" ? sample : createControlledClaudeQuery(),
+    );
+    try {
+      await fixture.turn();
+      await fixture.complete();
+      fixture.bridge.sendRequest(30, "thread/prompt-suggestion/request", {
+        threadId: fixture.threadId,
+        providerThreadId: fixture.providerThreadId,
+        requestId: "prediction-request",
+        sourceTurnId: "canonical-source-turn",
+        prompt: "Predict",
+      });
+      await fixture.bridge.flushWork();
+      sample.fail(new Error("Upstream authentication failed"));
+      const response = await fixture.bridge.waitForResponse(30);
+      expect(response.error?.message).toContain(
+        "Upstream authentication failed",
+      );
+      expect(response.result).toBeUndefined();
+      expect(sample.close).toHaveBeenCalled();
+    } finally {
+      sample.finish();
+      await fixture.close();
+    }
+  });
+
+  it("echoes the canonical source turn for a successful Button request without treating it as a native ID", async () => {
+    const fixture = await predictionFixture({ automatic: false });
+    const sample = createControlledClaudeQuery();
+    contextQueryMock.mockImplementation((args: { prompt: unknown }) =>
+      typeof args.prompt === "string" ? sample : createControlledClaudeQuery(),
+    );
+    try {
+      await fixture.turn();
+      await fixture.complete();
+      fixture.bridge.sendRequest(30, "thread/prompt-suggestion/request", {
+        threadId: fixture.threadId,
+        providerThreadId: fixture.providerThreadId,
+        requestId: "prediction-request",
+        sourceTurnId: "canonical-source-turn",
+        prompt: "Predict",
+      });
+      await fixture.bridge.flushWork();
+      fixture.bridge.sendRequest(31, "thread/prompt-suggestion/cancel", {
+        threadId: fixture.threadId,
+        providerThreadId: fixture.providerThreadId,
+        requestId: "unrelated-prediction-request",
+      });
+      await fixture.bridge.waitForResponse(31);
+      expect(fixture.bridge.hasResponse(30)).toBe(false);
+      sample.emit(
+        createSuccessfulResultMessage(
+          "ephemeral-native-session",
+          JSON.stringify({ suggestion: "Check the result" }),
+        ),
+      );
+      expect((await fixture.bridge.waitForResponse(30)).result).toEqual({
+        sourceTurnId: "canonical-source-turn",
+        text: JSON.stringify({ suggestion: "Check the result" }),
+      });
+      expect(fixture.events()).toEqual([]);
+    } finally {
+      sample.finish();
+      await fixture.close();
     }
   });
 

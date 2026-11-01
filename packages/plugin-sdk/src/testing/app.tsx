@@ -1,3 +1,4 @@
+import type { PromptSuggestionState } from "@bb/domain";
 import { experimental_PluginRpcCallError } from "../rpc-contract.js";
 import { invalidateTags, pluginTagScope } from "@bb/query-tags";
 import { QueryClient } from "@tanstack/react-query";
@@ -348,6 +349,7 @@ interface SlotEnv {
   rpcClient: PluginRpcClient;
   rpcCalls: RpcCall[];
   realtimeHandlers: Map<string, Set<(payload: unknown) => void>>;
+  promptSuggestions: PromptSuggestionState | null;
   realtimeConnection: TestRealtimeConnectionStore;
   settingsState: PluginSettingsState;
   bbContext: BbContext;
@@ -1672,6 +1674,14 @@ const testPluginSdkApp = {
       };
     }, [env, channel]);
   },
+  internal_DO_NOT_USE_usePromptSuggestions({
+    threadId,
+  }: {
+    threadId: string | null;
+  }): PromptSuggestionState | null {
+    const env = useSlotEnv("internal_DO_NOT_USE_usePromptSuggestions");
+    return threadId === null ? null : env.promptSuggestions;
+  },
   useRealtimeConnectionState(): PluginRealtimeConnectionState {
     const connection = useSlotEnv(
       "useRealtimeConnectionState",
@@ -2307,6 +2317,7 @@ export interface RenderSlotOptions<
   /** `experimental_usePluginId()` value; defaults to `test-plugin`. */
   pluginId?: string;
   /** Initial `useRealtimeConnectionState()` value; defaults to `connected`. */
+  promptSuggestions?: PromptSuggestionState | null;
   realtimeConnectionState?: PluginRealtimeConnectionState;
   /** Initial state for this render's isolated composer scope and view. */
   composer?: {
@@ -3329,6 +3340,7 @@ export function renderSlot<
     rpcClient,
     rpcCalls,
     realtimeHandlers,
+    promptSuggestions: options.promptSuggestions ?? null,
     realtimeConnection,
     settingsState: { values: options.settings, isLoading: false },
     bbContext: { projectId, threadId },

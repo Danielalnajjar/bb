@@ -28,3 +28,9 @@ export type {
 } from "@bb/sdk";
 
 export type * from "./machine-bootstrap.js";
+
+export type {
+  PromptSuggestionMode,
+  PromptSuggestionState,
+  PromptSuggestionConfiguration,
+} from "@bb/domain";

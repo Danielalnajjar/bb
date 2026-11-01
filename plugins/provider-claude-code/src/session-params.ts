@@ -7,6 +7,7 @@ import {
   type ReasoningLevel,
   type ServiceTier,
   type RuntimePermissionPolicy,
+  type ExperimentalPromptSuggestionConfiguration,
   buildShellEnvOverrides,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { z } from "zod";
@@ -67,6 +68,7 @@ function buildClaudeCodeConfig(
 }
 
 export type ClaudeSessionExecutionOptions = RuntimePermissionPolicy & {
+  promptSuggestions?: ExperimentalPromptSuggestionConfiguration | undefined;
   model?: string | undefined;
   reasoningLevel?: ReasoningLevel | undefined;
   serviceTier?: ServiceTier | undefined;
@@ -119,6 +121,7 @@ function buildInternalSessionParams(
   const skillConfig = buildClaudeSkillConfigParams(args.options.skillRoots);
   return {
     baseInstructions,
+    promptSuggestions: args.options.promptSuggestions,
     threadId: args.threadId,
     cwd: args.cwd,
     instructionMode: args.instructionMode,
@@ -164,6 +167,7 @@ const claudeProviderOptionsSchema = z
   .passthrough();
 
 type ClaudeCanonicalExecutionOptions = RuntimePermissionPolicy & {
+  promptSuggestions?: ExperimentalPromptSuggestionConfiguration | undefined;
   model?: string | undefined;
   reasoningLevel?: ReasoningLevel | undefined;
   serviceTier?: ServiceTier | undefined;
@@ -246,6 +250,7 @@ export function buildClaudeTurnParams(
     ...(args.expectedTurnId !== undefined
       ? { expectedTurnId: args.expectedTurnId }
       : {}),
+    promptSuggestions: args.options.promptSuggestions,
     input: stripClaudePlanCommandMentions({
       input: args.input,
       claudeCodePermissionMode: providerOptions.claudeCodePermissionMode,
@@ -268,7 +273,8 @@ export function buildClaudeTurnParams(
     ...(config ? { config } : {}),
     permissionMode: toClaudePermissionMode(args.options),
     permissionScope: args.options.permissionScope,
-    additionalWorkspaceWriteRoots: providerOptions.additionalWorkspaceWriteRoots ?? [],
+    additionalWorkspaceWriteRoots:
+      providerOptions.additionalWorkspaceWriteRoots ?? [],
     permissionEscalation: args.options.permissionEscalation,
     ...(providerOptions.claudeCodePermissionMode !== undefined
       ? { claudeCodePermissionMode: providerOptions.claudeCodePermissionMode }

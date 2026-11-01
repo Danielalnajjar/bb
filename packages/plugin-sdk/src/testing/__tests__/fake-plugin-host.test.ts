@@ -1514,7 +1514,12 @@ describe("agent tools", () => {
 
     await expect(
       harness.resolveAgentConfiguration(configurationContext),
-    ).resolves.toEqual({ tools: [], skills: [], instructions: null });
+    ).resolves.toEqual({
+      tools: [],
+      skills: [],
+      instructions: null,
+      promptSuggestions: false,
+    });
     expect(harness.logEntries.at(-1)?.message).toContain(
       "recursive JSON Schema $ref",
     );
@@ -1687,7 +1692,12 @@ describe("agent tools", () => {
     }));
     await expect(
       unknown.harness.resolveAgentConfiguration(configurationContext),
-    ).resolves.toEqual({ tools: [], skills: [], instructions: null });
+    ).resolves.toEqual({
+      tools: [],
+      skills: [],
+      instructions: null,
+      promptSuggestions: false,
+    });
     expect(unknown.harness.logEntries.at(-1)?.message).toContain(
       'unknown tool id "missing-tool"',
     );

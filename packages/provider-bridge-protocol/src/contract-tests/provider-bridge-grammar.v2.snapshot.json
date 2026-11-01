@@ -95,6 +95,12 @@
       "providerTurnId": "optional",
       "noTurnFallback": "optional"
     },
+    "prompt.suggestion": {
+      "kind": "required",
+      "sourceRequestId": "required",
+      "model": "required",
+      "text": "required"
+    },
     "provider.error": {
       "kind": "required",
       "message": "required",
@@ -298,6 +304,7 @@
     "badge": "optional"
   },
   "capabilities": {
+    "promptSuggestions": "optional",
     "sessionRestore": "default",
     "threadArchive": "default",
     "threadRename": "default",
@@ -329,6 +336,9 @@
     "thread/fork",
     "thread/goal/clear",
     "thread/name/set",
+    "thread/prompt-suggestion/cancel",
+    "thread/prompt-suggestion/configure",
+    "thread/prompt-suggestion/request",
     "thread/resume",
     "thread/start",
     "thread/stop",

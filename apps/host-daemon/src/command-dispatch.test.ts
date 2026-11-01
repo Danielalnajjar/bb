@@ -150,6 +150,14 @@ function createRuntime(): FakeDispatchRuntime {
       hostedThreadIds.delete(args.threadId);
       return { providerCheckpointId: null };
     }),
+    requestPromptSuggestion: vi.fn(
+      async ({ sourceTurnId }: { sourceTurnId: string }) => ({
+        sourceTurnId,
+        text: null,
+      }),
+    ),
+    cancelPromptSuggestion: vi.fn(async () => undefined),
+    configurePromptSuggestions: vi.fn(async () => undefined),
     clearThreadGoal: vi.fn(async () => ({ cleared: true })),
     renameThread: vi.fn(async () => undefined),
     archiveThread: vi.fn(async () => undefined),

@@ -7,6 +7,7 @@ import type { ThreadEvent } from "@bb/domain";
 import { promptTextInput } from "./test/prompt-input.js";
 import { UNSOLICITED_TURN_THREAD_ID_ENV } from "./test/bridges/unsolicited-turn-bridge.js";
 import {
+  waitForRuntimeState,
   createScriptedEchoLaunch,
   createScriptedEchoRequestRecord,
   createScriptedEchoRuntime,
@@ -100,6 +101,452 @@ describe("createAgentRuntime command contracts", () => {
     });
     return { record, runtime };
   }
+
+  it.each(["loaded", "resumed"] as const)(
+    "recovers a cleared suggestion source in a %s idle session without another turn",
+    async (sessionState) => {
+      const events: ThreadEvent[] = [];
+      const { record, runtime } = createContractRuntime({
+        onEvent: (event) => events.push(event),
+      });
+      const config = {
+        ...fullRuntimeOptions,
+        model: sessionState === "resumed" ? "changed-model" : "test-model",
+        promptSuggestions: {
+          automatic: false,
+          prompt: "predict",
+          sourceRequestId: "creq_23456789ab",
+        },
+      };
+      const clearedConfiguration = {
+        ...config.promptSuggestions,
+        sourceRequestId: null,
+      };
+      let sourceTurnId = "bb-completed-1";
+      try {
+        if (sessionState === "loaded") {
+          await runtime.startThread({
+            environmentId: "env-1",
+            threadId: "t1",
+            projectId: "p1",
+            providerId: "fake",
+            options: config,
+          });
+          await runtime.runTurn({
+            threadId: "t1",
+            input: [promptTextInput({ text: "hello" })],
+            clientRequestId: "creq_23456789ab",
+            options: config,
+          });
+          const started = await waitForThreadTurnStarted({
+            events,
+            threadId: "t1",
+            timeoutMs: 1000,
+          });
+          sourceTurnId = started.turnId;
+          await waitForThreadTurnCompleted({
+            events,
+            threadId: "t1",
+            turnId: sourceTurnId,
+            timeoutMs: 1000,
+          });
+          await runtime.configurePromptSuggestions({
+            threadId: "t1",
+            configuration: clearedConfiguration,
+          });
+        } else {
+          await runtime.resumeThread({
+            environmentId: "env-1",
+            threadId: "t1",
+            projectId: "p1",
+            providerId: "fake",
+            providerThreadId: "provider-t1",
+            options: { ...config, promptSuggestions: clearedConfiguration },
+          });
+        }
+        await expect(
+          runtime.requestPromptSuggestion({
+            threadId: "t1",
+            requestId: "prediction-1",
+            sourceTurnId,
+            prompt: "predict",
+            options: config,
+          }),
+        ).resolves.toEqual({
+          sourceTurnId,
+          text: '{"suggestion":"continue"}',
+        });
+        expect(
+          record.last("thread/prompt-suggestion/configure")?.params,
+        ).toMatchObject({ configuration: config.promptSuggestions });
+        expect(record.last("thread/stop")).toBeUndefined();
+        expect(
+          record.read().filter(({ method }) => method === "thread/resume"),
+        ).toHaveLength(sessionState === "resumed" ? 1 : 0);
+      } finally {
+        await runtime.shutdown();
+      }
+    },
+  );
+
+  it("rejects a stale source after clearing configuration when a newer completed turn is known", async () => {
+    const events: ThreadEvent[] = [];
+    const { record, runtime } = createContractRuntime({
+      onEvent: (event) => events.push(event),
+    });
+    const staleConfig = {
+      ...fullRuntimeOptions,
+      promptSuggestions: {
+        automatic: false,
+        prompt: "predict",
+        sourceRequestId: "creq_23456789ab",
+      },
+    };
+    const currentConfig = {
+      ...staleConfig,
+      promptSuggestions: {
+        ...staleConfig.promptSuggestions,
+        sourceRequestId: "creq_3456789abc",
+      },
+    };
+    try {
+      await runtime.startThread({
+        environmentId: "env-1",
+        threadId: "t1",
+        projectId: "p1",
+        providerId: "fake",
+        options: staleConfig,
+      });
+      await runtime.runTurn({
+        threadId: "t1",
+        input: [promptTextInput({ text: "new instruction" })],
+        clientRequestId: "creq_3456789abc",
+        options: currentConfig,
+      });
+      const { turnId } = await waitForThreadTurnStarted({
+        events,
+        threadId: "t1",
+        timeoutMs: 1000,
+      });
+      await waitForThreadTurnCompleted({
+        events,
+        threadId: "t1",
+        turnId,
+        timeoutMs: 1000,
+      });
+      await runtime.configurePromptSuggestions({
+        threadId: "t1",
+        configuration: {
+          ...currentConfig.promptSuggestions,
+          sourceRequestId: null,
+        },
+      });
+      await expect(
+        runtime.requestPromptSuggestion({
+          threadId: "t1",
+          requestId: "stale-prediction",
+          sourceTurnId: "bb-completed-old",
+          prompt: "predict",
+          options: staleConfig,
+        }),
+      ).rejects.toThrow("Prompt suggestion source changed");
+      expect(record.last("thread/prompt-suggestion/request")).toBeUndefined();
+      await expect(
+        runtime.requestPromptSuggestion({
+          threadId: "t1",
+          requestId: "current-prediction",
+          sourceTurnId: turnId,
+          prompt: "predict",
+          options: currentConfig,
+        }),
+      ).resolves.toEqual({
+        sourceTurnId: turnId,
+        text: '{"suggestion":"continue"}',
+      });
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it.each(["test-model", "changed-model"])(
+    "does not overwrite a non-null suggestion source for requested model %s",
+    async (model) => {
+      const { runtime } = createContractRuntime();
+      const config = {
+        ...fullRuntimeOptions,
+        promptSuggestions: {
+          automatic: false,
+          prompt: "predict",
+          sourceRequestId: "creq_3456789abc",
+        },
+      };
+      try {
+        await runtime.startThread({
+          environmentId: "env-1",
+          threadId: "t1",
+          projectId: "p1",
+          providerId: "fake",
+          options: config,
+        });
+        await expect(
+          runtime.requestPromptSuggestion({
+            threadId: "t1",
+            requestId: "stale-prediction",
+            sourceTurnId: "bb-completed-old",
+            prompt: "predict",
+            options: {
+              ...config,
+              model,
+              promptSuggestions: {
+                ...config.promptSuggestions,
+                sourceRequestId: "creq_23456789ab",
+              },
+            },
+          }),
+        ).rejects.toThrow("Prompt suggestion source changed");
+        await expect(
+          runtime.requestPromptSuggestion({
+            threadId: "t1",
+            requestId: "current-prediction",
+            sourceTurnId: "bb-completed-current",
+            prompt: "predict",
+            options: config,
+          }),
+        ).resolves.toEqual({
+          sourceTurnId: "bb-completed-current",
+          text: '{"suggestion":"continue"}',
+        });
+      } finally {
+        await runtime.shutdown();
+      }
+    },
+  );
+
+  it("cancels source recovery before a new parent turn and keeps the newer source", async () => {
+    const events: ThreadEvent[] = [];
+    const { record, runtime } = createContractRuntime({
+      launch: {
+        providerOptions: {
+          scripted: { promptSuggestionConfigureWaitForCancel: true },
+        },
+      },
+      onEvent: (event) => events.push(event),
+    });
+    const config = {
+      ...fullRuntimeOptions,
+      promptSuggestions: {
+        automatic: false,
+        prompt: "predict",
+        sourceRequestId: "creq_23456789ab",
+      },
+    };
+    const currentConfig = {
+      ...config,
+      promptSuggestions: {
+        ...config.promptSuggestions,
+        sourceRequestId: "creq_3456789abc",
+      },
+    };
+    try {
+      await runtime.startThread({
+        environmentId: "env-1",
+        threadId: "t1",
+        projectId: "p1",
+        providerId: "fake",
+        options: {
+          ...config,
+          promptSuggestions: {
+            ...config.promptSuggestions,
+            sourceRequestId: null,
+          },
+        },
+      });
+      const prediction = runtime.requestPromptSuggestion({
+        threadId: "t1",
+        requestId: "old-prediction",
+        sourceTurnId: "bb-completed-old",
+        prompt: "predict",
+        options: config,
+      });
+      await waitForRuntimeState({
+        label: "source recovery waiting for cancellation",
+        timeoutMs: 1000,
+        predicate: () =>
+          record.last("thread/prompt-suggestion/configure") !== undefined,
+      });
+      await runtime.runTurn({
+        threadId: "t1",
+        input: [promptTextInput({ text: "new instruction" })],
+        clientRequestId: "creq_3456789abc",
+        options: currentConfig,
+      });
+      await expect(prediction).resolves.toEqual({
+        sourceTurnId: "bb-completed-old",
+        text: null,
+      });
+      expect(record.last("thread/prompt-suggestion/request")).toBeUndefined();
+      const { turnId } = await waitForThreadTurnStarted({
+        events,
+        threadId: "t1",
+        timeoutMs: 1000,
+      });
+      await waitForThreadTurnCompleted({
+        events,
+        threadId: "t1",
+        turnId,
+        timeoutMs: 1000,
+      });
+      await expect(
+        runtime.requestPromptSuggestion({
+          threadId: "t1",
+          requestId: "current-prediction",
+          sourceTurnId: turnId,
+          prompt: "predict",
+          options: currentConfig,
+        }),
+      ).resolves.toEqual({
+        sourceTurnId: turnId,
+        text: '{"suggestion":"continue"}',
+      });
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it("starts a parent turn and cancels sampling while the prediction RPC is still pending", async () => {
+    const { record, runtime } = createContractRuntime({
+      launch: { scripted: { promptSuggestionWaitForCancel: true } },
+    });
+    const config = {
+      ...fullRuntimeOptions,
+      promptSuggestions: {
+        automatic: false,
+        prompt: "predict",
+        sourceRequestId: "creq_23456789ab",
+      },
+    };
+    try {
+      await runtime.startThread({
+        environmentId: "env-1",
+        threadId: "t1",
+        projectId: "p1",
+        providerId: "fake",
+        options: config,
+      });
+      const prediction = runtime.requestPromptSuggestion({
+        threadId: "t1",
+        requestId: "prediction-1",
+        sourceTurnId: "bb-completed-1",
+        prompt: "predict",
+        options: config,
+      });
+      await waitForRuntimeState({
+        label: "prediction request started",
+        timeoutMs: 1000,
+        predicate: () =>
+          record.last("thread/prompt-suggestion/request") !== undefined,
+      });
+      await runtime.runTurn({
+        threadId: "t1",
+        input: [promptTextInput({ text: "new instruction" })],
+        clientRequestId: "creq_3456789abc",
+        options: {
+          ...config,
+          promptSuggestions: {
+            ...config.promptSuggestions,
+            sourceRequestId: "creq_3456789abc",
+          },
+        },
+      });
+      await expect(prediction).resolves.toEqual({
+        sourceTurnId: "bb-completed-1",
+        text: null,
+      });
+      expect(
+        record.last("thread/prompt-suggestion/cancel")?.params,
+      ).toMatchObject({ requestId: "prediction-1" });
+      expect(record.last("turn/start")).toBeDefined();
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it("does not let a cancelled request's late error cancel a newer prediction", async () => {
+    const { record, runtime } = createContractRuntime({
+      launch: {
+        scripted: {
+          promptSuggestionWaitForCancel: true,
+          promptSuggestionLateCancelError: true,
+        },
+      },
+    });
+    const config = {
+      ...fullRuntimeOptions,
+      promptSuggestions: {
+        automatic: false,
+        prompt: "predict",
+        sourceRequestId: "creq_23456789ab",
+      },
+    };
+    let newerOutcome: Promise<unknown> | null = null;
+    try {
+      await runtime.startThread({
+        environmentId: "env-1",
+        threadId: "t1",
+        projectId: "p1",
+        providerId: "fake",
+        options: config,
+      });
+      const old = runtime.requestPromptSuggestion({
+        threadId: "t1",
+        requestId: "old-prediction",
+        sourceTurnId: "bb-completed-1",
+        prompt: "predict",
+        options: config,
+      });
+      const oldOutcome = old.catch((error: unknown) => error);
+      await waitForRuntimeState({
+        label: "old prediction started",
+        timeoutMs: 1000,
+        predicate: () =>
+          record.last("thread/prompt-suggestion/request") !== undefined,
+      });
+      await runtime.cancelPromptSuggestion({
+        threadId: "t1",
+        requestId: "old-prediction",
+      });
+      newerOutcome = runtime
+        .requestPromptSuggestion({
+          threadId: "t1",
+          requestId: "new-prediction",
+          sourceTurnId: "bb-completed-1",
+          prompt: "predict",
+          options: config,
+        })
+        .catch((error: unknown) => error);
+      await expect(oldOutcome).resolves.toMatchObject({
+        message: expect.stringContaining("Late cancelled prediction error"),
+      });
+      await runtime.listModels({ providerId: "fake" });
+      expect(
+        record
+          .read()
+          .filter(({ method }) => method === "thread/prompt-suggestion/cancel"),
+      ).toHaveLength(1);
+      expect(
+        record.last("thread/prompt-suggestion/cancel")?.params,
+      ).toMatchObject({ requestId: "old-prediction" });
+    } finally {
+      if (newerOutcome) {
+        await runtime.cancelPromptSuggestion({
+          threadId: "t1",
+          requestId: "new-prediction",
+        });
+        await newerOutcome;
+      }
+      await runtime.shutdown();
+    }
+  });
 
   it("passes runtime workspace-write roots to the provider as provider options", async () => {
     const additionalWorkspaceWriteRoots = [

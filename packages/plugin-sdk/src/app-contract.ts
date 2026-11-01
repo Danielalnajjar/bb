@@ -1,3 +1,4 @@
+import type { PromptSuggestionState } from "@bb/domain";
 import type {
   ExperimentalRpcKeyedMethod,
   ExperimentalRpcKeyedValue,
@@ -5434,6 +5435,10 @@ export interface PluginSdkApp {
    * connection can transition from `connecting` and is not a reconnection.
    */
   useRealtimeConnectionState(): PluginRealtimeConnectionState;
+  /** First-party composer read of the shared transient next-prompt state. */
+  internal_DO_NOT_USE_usePromptSuggestions(args: {
+    threadId: string | null;
+  }): PromptSuggestionState | null;
   useSettings(): PluginSettingsState;
   /**
    * Whether the bb experiment `key` is on (Settings → Experiments,

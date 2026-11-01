@@ -1244,6 +1244,8 @@ export interface PluginAgentToolSelection {
 
 /** Per-resolution selection returned by {@link PluginAgents.configure}. */
 export interface PluginAgentConfiguration {
+  /** Disables next-prompt generation for this thread; another plugin cannot re-enable it. */
+  experimental_promptSuggestions?: false;
   /** Tool names registered by this plugin, or {@link PluginAgentToolSelection}
    * entries to also override a tool's advertised parameter schema for this
    * resolution. Duplicate or unknown names, or an invalid override, reject

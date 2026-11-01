@@ -28,6 +28,7 @@ import {
   threadListQueryKey,
   threadPromptHistoryQueryKey,
   threadQueryKey,
+  threadPromptSuggestionQueryKey,
   threadTabsQueryKey,
   threadSearchQueryKey,
   terminalsQueryKey,
@@ -430,6 +431,37 @@ describe("createRealtimeCacheEffects", () => {
       }
     },
   );
+
+  it("invalidates only the matching prompt suggestion and does not refetch it for streamed text", () => {
+    vi.useFakeTimers();
+    const { effects, queryClient } = createRealtimeEffectsTestContext();
+    const key = threadPromptSuggestionQueryKey("thr_1");
+    const otherKey = threadPromptSuggestionQueryKey("thr_2");
+    queryClient.setQueryData(key, { text: "continue" });
+    queryClient.setQueryData(otherKey, { text: "other" });
+    try {
+      effects.handleChanged({
+        type: "changed",
+        entity: "thread",
+        id: "thr_1",
+        changes: ["events-appended"],
+        metadata: { eventTypes: ["item/agentMessage/delta"] },
+      });
+      vi.advanceTimersByTime(50);
+      expect(queryClient.getQueryState(key)?.isInvalidated).toBe(false);
+      effects.handleChanged({
+        type: "changed",
+        entity: "thread",
+        id: "thr_1",
+        changes: ["prompt-suggestion-changed"],
+      });
+      expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
+      expect(queryClient.getQueryState(otherKey)?.isInvalidated).toBe(false);
+    } finally {
+      effects.dispose();
+      vi.useRealTimers();
+    }
+  });
 
   it("refreshes only the server move status when a move changes", () => {
     const { effects, queryClient } = createRealtimeEffectsTestContext();

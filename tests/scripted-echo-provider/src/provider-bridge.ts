@@ -13,6 +13,9 @@ import {
   THREAD_DELTA_NOTIFICATION_METHOD,
   createBridgeIo,
   initializeParamsSchema,
+  experimental_promptSuggestionRequestParamsSchema,
+  experimental_promptSuggestionCancelParamsSchema,
+  experimental_promptSuggestionConfigureParamsSchema,
   modelListParamsSchema,
   skillsConfigureParamsSchema,
   threadArchiveParamsSchema,
@@ -30,6 +33,7 @@ import {
   providerRecoveryKindSchema,
   runBridgeRequest,
   type ProviderRecoveryHint,
+  type ExperimentalPromptSuggestionConfiguration,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { appendFileSync } from "node:fs";
 import { z } from "zod";
@@ -48,10 +52,16 @@ const scriptedMethodSchema = z.enum([
   "thread/unarchive",
   "thread/name/set",
   "thread/goal/clear",
+  "thread/prompt-suggestion/request",
+  "thread/prompt-suggestion/cancel",
+  "thread/prompt-suggestion/configure",
   "skills/configure",
 ]);
 export const scriptedEchoOptionsSchema = z
   .object({
+    promptSuggestionWaitForCancel: z.boolean().optional(),
+    promptSuggestionLateCancelError: z.boolean().optional(),
+    promptSuggestionConfigureWaitForCancel: z.boolean().optional(),
     startDelayMs: z.number().int().nonnegative().optional(),
     turnStartResponseDelayMs: z.number().int().nonnegative().optional(),
     answerStartWithoutIdentity: z.boolean().optional(),
@@ -165,6 +175,7 @@ interface Session {
   messageCount: number;
   activeTurn: ActiveTurn | null;
   options: ScriptedEchoOptions;
+  promptSuggestions: ExperimentalPromptSuggestionConfiguration | undefined;
 }
 
 type PendingReply =
@@ -179,6 +190,13 @@ type PendingReply =
 
 const sessions = new Map<string, Session>();
 const pendingReplies = new Map<JsonRpcId, PendingReply>();
+const suggestionReplies = new Map<
+  string,
+  { id: JsonRpcId; sourceTurnId: string }
+>();
+const suggestionConfigurationReplies = new Map<string, JsonRpcId>();
+let lateCancelledSuggestionId: JsonRpcId | null = null;
+let delayedSuggestionCancellationUsed = false;
 const unarchivedSessionIds = new Set<string>();
 const archivedSessionIds = new Set<string>();
 const scriptedFailureCounts = new Map<number, number>();
@@ -798,6 +816,7 @@ function openSession(args: {
   threadId: string;
   providerThreadId: string;
   options: ScriptedEchoOptions;
+  promptSuggestions: ExperimentalPromptSuggestionConfiguration | undefined;
 }): Session {
   const session: Session = {
     threadId: args.threadId,
@@ -806,6 +825,7 @@ function openSession(args: {
     messageCount: 0,
     activeTurn: null,
     options: args.options,
+    promptSuggestions: args.promptSuggestions,
   };
   sessions.set(args.threadId, session);
   if (args.options.identityAfterResponse !== true) {
@@ -901,6 +921,7 @@ const handlers: Record<string, RequestHandler> = {
         threadArchive: true,
         threadRename: true,
         threadGoalClear: true,
+        promptSuggestions: true,
         fork: "checkpoint",
         approvalEnforcedBy: processOptions.approvalEnforcedBy ?? "runtime",
         grammarVersions: [THREAD_DELTA_GRAMMAR_V3, THREAD_DELTA_GRAMMAR_V3],
@@ -996,6 +1017,7 @@ const handlers: Record<string, RequestHandler> = {
         threadId: parsed.data.threadId,
         providerThreadId: mintProviderThreadId(options),
         options,
+        promptSuggestions: parsed.data.options.promptSuggestions,
       });
       logProcessStep(`thread/start:${process.pid}:${parsed.data.threadId}`);
       io.sendResult(id, identityResult(session));
@@ -1027,6 +1049,7 @@ const handlers: Record<string, RequestHandler> = {
         threadId: parsed.data.threadId,
         providerThreadId: parsed.data.providerThreadId,
         options,
+        promptSuggestions: parsed.data.options.promptSuggestions,
       });
       logProcessStep(
         `thread/resume:${process.pid}:${parsed.data.threadId}:${parsed.data.providerThreadId}`,
@@ -1053,6 +1076,7 @@ const handlers: Record<string, RequestHandler> = {
         threadId: parsed.data.threadId,
         providerThreadId: mintProviderThreadId(options),
         options,
+        promptSuggestions: parsed.data.options.promptSuggestions,
       });
       io.sendResult(id, identityResult(session));
       if (session.options.identityAfterResponse === true) {
@@ -1073,6 +1097,7 @@ const handlers: Record<string, RequestHandler> = {
       return;
     }
     session.options = scriptedOptionsFor(parsed.data.options.providerOptions);
+    session.promptSuggestions = parsed.data.options.promptSuggestions;
     if (rejectIfArchived(id, session.options, session.providerThreadId)) {
       return;
     }
@@ -1230,6 +1255,80 @@ const handlers: Record<string, RequestHandler> = {
     }
   },
 
+  [BRIDGE_REQUEST_METHODS.threadPromptSuggestionRequest]: (id, params) => {
+    const request =
+      experimental_promptSuggestionRequestParamsSchema.parse(params);
+    const session = sessions.get(request.threadId);
+    if (!session?.promptSuggestions?.sourceRequestId) {
+      io.sendError(id, -32000, "Prompt suggestion source is not configured");
+      return;
+    }
+    const options = session.options;
+    if (options.promptSuggestionWaitForCancel) {
+      suggestionReplies.set(request.requestId, {
+        id,
+        sourceTurnId: request.sourceTurnId,
+      });
+      if (lateCancelledSuggestionId !== null) {
+        io.sendError(
+          lateCancelledSuggestionId,
+          -32000,
+          "Late cancelled prediction error",
+        );
+        lateCancelledSuggestionId = null;
+      }
+      return;
+    }
+    io.sendResult(id, {
+      sourceTurnId: request.sourceTurnId,
+      text: '{"suggestion":"continue"}',
+    });
+  },
+  [BRIDGE_REQUEST_METHODS.threadPromptSuggestionCancel]: (id, params) => {
+    const request =
+      experimental_promptSuggestionCancelParamsSchema.parse(params);
+    const pending = suggestionReplies.get(request.requestId);
+    suggestionReplies.delete(request.requestId);
+    io.sendResult(id, {});
+    const configuring = suggestionConfigurationReplies.get(request.threadId);
+    if (configuring !== undefined) {
+      suggestionConfigurationReplies.delete(request.threadId);
+      io.sendResult(configuring, {});
+    }
+    const options = sessions.get(request.threadId)?.options ?? processOptions;
+    if (
+      pending &&
+      options.promptSuggestionLateCancelError &&
+      !delayedSuggestionCancellationUsed
+    ) {
+      lateCancelledSuggestionId = pending.id;
+      delayedSuggestionCancellationUsed = true;
+      return;
+    }
+    if (pending)
+      io.sendResult(pending.id, {
+        sourceTurnId: pending.sourceTurnId,
+        text: '{"suggestion":"obsolete"}',
+      });
+  },
+  [BRIDGE_REQUEST_METHODS.threadPromptSuggestionConfigure]: (id, params) => {
+    const request =
+      experimental_promptSuggestionConfigureParamsSchema.parse(params);
+    const session = sessions.get(request.threadId);
+    if (!session) {
+      io.sendError(id, -32000, `Unknown thread: ${request.threadId}`);
+      return;
+    }
+    session.promptSuggestions = request.configuration;
+    if (
+      session.options.promptSuggestionConfigureWaitForCancel &&
+      request.configuration.sourceRequestId
+    ) {
+      suggestionConfigurationReplies.set(request.threadId, id);
+      return;
+    }
+    io.sendResult(id, {});
+  },
   [BRIDGE_REQUEST_METHODS.threadGoalClear]: (id, params) => {
     const parsed = threadGoalClearParamsSchema.safeParse(params);
     if (!parsed.success) {

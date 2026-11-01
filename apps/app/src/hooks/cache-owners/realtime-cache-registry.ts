@@ -1,3 +1,7 @@
+import {
+  threadPromptSuggestionQueryKey,
+  allThreadPromptSuggestionsQueryKeyPrefix,
+} from "../queries/query-keys";
 import type { QueryClient, QueryKey } from "@tanstack/react-query";
 import type {
   EnvironmentChangeKind,
@@ -339,6 +343,10 @@ export function disposeTrailingActiveRefetches(queryClient: QueryClient): void {
 }
 
 export const REALTIME_THREAD_CHANGE_REGISTRY = {
+  "prompt-suggestion-changed": {
+    flush: "immediate",
+    dirty: [dirtyThreadPromptSuggestionQueries],
+  },
   "thread-created": {
     flush: "debounced",
     dirty: [
@@ -351,6 +359,7 @@ export const REALTIME_THREAD_CHANGE_REGISTRY = {
   "thread-deleted": {
     flush: "debounced",
     dirty: [
+      dirtyThreadPromptSuggestionQueries,
       dirtyThreadListQueries,
       dirtyThreadDetailQueries,
       dirtyThreadTimelineQueries,
@@ -370,6 +379,7 @@ export const REALTIME_THREAD_CHANGE_REGISTRY = {
   "history-rewritten": {
     flush: "immediate",
     dirty: [
+      dirtyThreadPromptSuggestionQueries,
       dirtyThreadListQueries,
       dirtyThreadDetailQueries,
       dirtyThreadSearchQueries,
@@ -381,7 +391,10 @@ export const REALTIME_THREAD_CHANGE_REGISTRY = {
   },
   "history-compacted": {
     flush: "debounced",
-    dirty: [getThreadCompactedHistoryInvalidationQueryKeys],
+    dirty: [
+      getThreadCompactedHistoryInvalidationQueryKeys,
+      dirtyThreadPromptSuggestionQueries,
+    ],
   },
   "interactions-changed": {
     flush: "debounced",
@@ -394,7 +407,11 @@ export const REALTIME_THREAD_CHANGE_REGISTRY = {
   "status-changed": {
     flush: "immediate",
     patch: [patchThreadStatusState],
-    dirty: [refreshThreadListStatusState, dirtyThreadDetailQueries],
+    dirty: [
+      refreshThreadListStatusState,
+      dirtyThreadDetailQueries,
+      dirtyThreadPromptSuggestionQueries,
+    ],
   },
   "title-changed": {
     flush: "debounced",
@@ -410,6 +427,7 @@ export const REALTIME_THREAD_CHANGE_REGISTRY = {
   "archived-changed": {
     flush: "debounced",
     dirty: [
+      dirtyThreadPromptSuggestionQueries,
       dirtyThreadListQueries,
       dirtyThreadDetailQueries,
       dirtyProjectPromptHistoryQueries,
@@ -421,11 +439,16 @@ export const REALTIME_THREAD_CHANGE_REGISTRY = {
   },
   "parent-changed": {
     flush: "debounced",
-    dirty: [dirtyThreadListQueries, dirtyThreadDetailQueries],
+    dirty: [
+      dirtyThreadPromptSuggestionQueries,
+      dirtyThreadListQueries,
+      dirtyThreadDetailQueries,
+    ],
   },
   "environment-changed": {
     flush: "immediate",
     dirty: [
+      dirtyThreadPromptSuggestionQueries,
       dirtyActiveThreadListQueries,
       dirtyThreadDetailQueries,
       dirtyThreadDefaultExecutionOptionsQueries,
@@ -1242,4 +1265,12 @@ function dirtyEnvironmentProviderQueries(): QueryKey[] {
 
 function reconcilePluginFrontendBundles(): void {
   schedulePluginFrontendReconcile();
+}
+
+function dirtyThreadPromptSuggestionQueries({
+  threadId,
+}: ThreadRealtimeDirtyContext): QueryKey[] {
+  return threadId
+    ? [threadPromptSuggestionQueryKey(threadId)]
+    : [allThreadPromptSuggestionsQueryKeyPrefix()];
 }

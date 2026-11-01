@@ -6,6 +6,7 @@ import {
   extensionKindSchema,
   jsonValueSchema,
   promptCacheTtlMsSchema,
+  promptSuggestionRawTextSchema,
   providerErrorCategorySchema,
   providerErrorInfoSchema,
   providerRateLimitStateSchema,
@@ -352,6 +353,12 @@ export const threadDeltaSchema = z.discriminatedUnion("kind", [
     providerTurnId: providerTurnIdSchema.optional(),
   }),
 
+  z.object({
+    kind: z.literal("prompt.suggestion"),
+    sourceRequestId: z.string().min(1),
+    model: z.string().min(1),
+    text: promptSuggestionRawTextSchema.nullable(),
+  }),
   z.object({ kind: z.literal("thread.started") }),
   z.object({
     kind: z.literal("thread.identity"),
