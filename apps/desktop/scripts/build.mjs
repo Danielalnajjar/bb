@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFile, rm } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { build } from "esbuild";
 import { resolveDesktopReleaseChannel } from "./desktop-release-channel.mjs";
@@ -153,5 +153,22 @@ await Promise.all([
     outfile: resolve(distDir, "bb-app-bridge.mjs"),
   }),
 ]);
+
+await writeFile(
+  resolve(distDir, "build-provenance.json"),
+  JSON.stringify(
+    {
+      schemaVersion: 1,
+      customBuild: desktopCustomBuild,
+      commit: desktopCommit,
+      version: desktopVersion,
+      pluginSdkVersion,
+      channel: desktopReleaseChannel,
+      buildDate: desktopBuildDate,
+    },
+    null,
+    2,
+  ) + "\n",
+);
 
 process.stdout.write("@bb/desktop: built Electron entries\n");

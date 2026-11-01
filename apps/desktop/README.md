@@ -618,3 +618,5 @@ desktop session when a machine credential is rejected. Closing the sign-in
 window leaves the error screen available. Fatal errors have no buttons. The renderer sends the chosen
 action on `bb-desktop:startup-action`. The main process accepts only actions
 from the error page that is currently loaded in an app window's main frame.
+
+Marked custom packages also carry `Contents/Resources/bb-custom-build.json` on macOS, generated from the same normalized build metadata as About. Maintenance reads this source/version/feature receipt to detect an accidental return to stock; the package copy is included before signing, not patched into an installed application.

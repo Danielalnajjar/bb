@@ -652,3 +652,20 @@ describe("electron-builder signing config", () => {
     expect(completeAppleCredentials.config.dmg.sign).toBe(false);
   });
 });
+
+it.each([undefined, "prompt-suggestions"])(
+  "copies custom provenance only for marked packages: %s",
+  async (customBuild) => {
+    const { config } = await readResolvedConfig({
+      BB_DESKTOP_CUSTOM_BUILD: customBuild,
+    });
+    if (customBuild) {
+      expect(config.extraResources).toContainEqual({
+        from: "dist/build-provenance.json",
+        to: "bb-custom-build.json",
+      });
+    } else {
+      expect(config.extraResources).toBeUndefined();
+    }
+  },
+);

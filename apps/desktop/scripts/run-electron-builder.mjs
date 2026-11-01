@@ -178,6 +178,13 @@ function resolveElectronBuilderConfig(baseConfig, env, electronBuilderArgs) {
     delete mac.identity;
   }
 
+  if (env.BB_DESKTOP_CUSTOM_BUILD?.trim()) {
+    config.extraResources = [
+      ...(config.extraResources ?? []),
+      { from: "dist/build-provenance.json", to: "bb-custom-build.json" },
+    ];
+  }
+
   config.mac = mac;
   config.linux = {
     ...config.linux,
