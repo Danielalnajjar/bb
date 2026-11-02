@@ -858,7 +858,12 @@ export const events = sqliteTable(
       .on(table.itemKind, table.createdAt, table.id)
       .where(sql`${table.type} = 'item/completed'`),
     index("events_thread_state_thread_sequence_idx")
-      .on(table.threadId, table.sequence)
+      .on(
+        table.threadId,
+        table.sequence,
+        table.type,
+        sql`json_extract(${table.data}, '$.kind')`,
+      )
       .where(
         sql`${table.type} IN ('thread/goal/updated', 'thread/goal/cleared', 'thread/extensionState/updated')`,
       ),

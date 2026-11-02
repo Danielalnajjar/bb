@@ -1936,6 +1936,47 @@ describe("slow query index plans", () => {
     db.$client.close();
   });
 
+  it("finds an older goal behind unrelated large state payloads using a covering index", () => {
+    const { db, thread } = setup();
+    try {
+      insertEvents(
+        db,
+        noopNotifier,
+        Array.from({ length: 129 }, (_, index) => ({
+          data: JSON.stringify(
+            index === 0
+              ? { kind: "provider-codex/goal", goal: "Keep the matching state" }
+              : { kind: "other-plugin/state", payload: "x".repeat(32_768) },
+          ),
+          itemId: null,
+          itemKind: null,
+          parentToolCallId: null,
+          scope: threadScope(),
+          sequence: index + 1,
+          threadId: thread.id,
+          type: "thread/extensionState/updated" as const,
+        })),
+      );
+      const captured = captureStatements(db, () => {
+        const result = listLatestThreadStateEventRowsByThreadIds(db, {
+          threadIds: [thread.id],
+          kind: "provider-codex/goal",
+        });
+        expect(result.map((row) => row.sequence)).toEqual([1]);
+      });
+      const statement = captured.find((entry) =>
+        entry.sql.includes("events_thread_state_thread_sequence_idx"),
+      );
+      if (!statement)
+        throw new Error("Expected the latest-thread-state lookup SQL");
+      expect(queryPlanDetails({ db, ...statement })).toContain(
+        "USING COVERING INDEX events_thread_state_thread_sequence_idx",
+      );
+    } finally {
+      db.$client.close();
+    }
+  });
+
   it("serves the thread-list pending probe from its covering index without a GROUP BY sort", () => {
     const { db } = setup();
 
