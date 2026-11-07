@@ -720,13 +720,14 @@ describe("slow query index plans", () => {
     expect(details).toMatch(
       /SEARCH events USING COVERING INDEX events_parent_tool_call_thread_parent_sequence_idx \(thread_id=\? AND parent_tool_call_id>\?\)/u,
     );
-    expect(details.indexOf("SCAN nested_history")).toBeGreaterThanOrEqual(0);
-    expect(details.indexOf("SCAN nested_history")).toBeLessThan(
-      details.indexOf("INDEX events_delegating_item_lookup_idx"),
+    expect(details).toContain("CO-ROUTINE parent_ids");
+    expect(details).toMatch(
+      /SEARCH next USING COVERING INDEX events_parent_tool_call_thread_parent_sequence_idx \(thread_id=\? AND parent_tool_call_id>\?\)/u,
     );
     expect(details).toMatch(
-      /SEARCH events USING (?:COVERING )?INDEX events_delegating_item_lookup_idx/u,
+      /SEARCH parent USING (?:COVERING )?INDEX events_delegating_item_lookup_idx \(thread_id=\? AND item_id=\? AND sequence>\? AND sequence<\?\)/u,
     );
+    expect(details).not.toContain("nested_history");
 
     db.$client.close();
   });

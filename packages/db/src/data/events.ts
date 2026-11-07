@@ -3781,28 +3781,54 @@ export function getFirstParentedTimelineBoundarySequence(
   db: DbConnection,
   args: { threadId: string; sequenceStart: number; maxSeq: number },
 ): number | null {
-  const result = db.get<{ sequence: number | null }>(sql`
-    WITH nested_history AS MATERIALIZED (
+  const historical =
+    args.maxSeq < getLatestThreadSequence(db, { threadId: args.threadId });
+  const parentCandidates = historical
+    ? sql`nested_history AS MATERIALIZED (
       SELECT 1
       FROM events INDEXED BY events_parent_tool_call_thread_parent_sequence_idx
       WHERE thread_id = ${args.threadId} AND parent_tool_call_id IS NOT NULL
       LIMIT 1
-    ), parents AS MATERIALIZED (
-      SELECT item_id, turn_id, min(sequence) AS start
-      FROM nested_history CROSS JOIN events INDEXED BY events_delegating_item_lookup_idx
-      WHERE thread_id = ${args.threadId}
-        AND item_kind IN ('toolCall', 'delegation')
-        AND parent_tool_call_id IS NULL
-        AND sequence >= ${args.sequenceStart} AND sequence <= ${args.maxSeq}
+    )`
+    : sql`parent_ids(item_id) AS (parent_ids(item_id) AS (
+      SELECT min(parent_tool_call_id)
+      FROM events INDEXED BY events_parent_tool_call_thread_parent_sequence_idx
+      WHERE thread_id = ${args.threadId} AND parent_tool_call_id IS NOT NULL
+      UNION ALL
+      SELECT (
+        SELECT min(next.parent_tool_call_id)
+        FROM events AS next INDEXED BY events_parent_tool_call_thread_parent_sequence_idx
+        WHERE next.thread_id = ${args.threadId}
+          AND next.parent_tool_call_id > parent_ids.item_id
+      )
+      FROM parent_ids
+      WHERE parent_ids.item_id IS NOT NULL
+    )`;
+  const parentSource = historical
+    ? sql`nested_history`
+    : sql`parent_ids`;
+  const parentFilter = historical
+    ? sql``
+    : sql`AND parent.item_id = parent_ids.item_id`;
+  const result = db.get<{ sequence: number | null }>(sql`
+    WITH RECURSIVE ${parentCandidates}, parents AS MATERIALIZED (
+      SELECT parent.item_id, parent.turn_id, min(parent.sequence) AS start
+      FROM ${parentSource}
+      CROSS JOIN events AS parent INDEXED BY events_delegating_item_lookup_idx
+      WHERE parent.thread_id = ${args.threadId}
+        ${parentFilter}
+        AND parent.item_kind IN ('toolCall', 'delegation')
+        AND parent.parent_tool_call_id IS NULL
+        AND parent.sequence >= ${args.sequenceStart} AND parent.sequence <= ${args.maxSeq}
         AND EXISTS (
           SELECT 1 FROM events AS root_start INDEXED BY events_thread_turn_type_item_sequence_idx
-          WHERE root_start.thread_id = events.thread_id
-            AND root_start.turn_id = events.turn_id
+          WHERE root_start.thread_id = parent.thread_id
+            AND root_start.turn_id = parent.turn_id
             AND root_start.type = 'turn/started'
             AND root_start.parent_tool_call_id IS NULL
             AND root_start.sequence <= ${args.maxSeq}
         )
-      GROUP BY item_id, turn_id
+      GROUP BY parent.item_id, parent.turn_id
     ), spans AS MATERIALIZED (
       SELECT start, (
         SELECT max(child.sequence)
