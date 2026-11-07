@@ -53,6 +53,7 @@ export function registerListCommand(
     .option("--section <id>", "Filter by thread section ID")
     .option("--unsectioned", "Show only threads outside sections")
     .option("--archived", "Show only archived threads")
+    .option("--no-archived", "Show only unarchived threads")
     .option("--include-archived", "Include archived threads")
     .option("--include-hidden", "Include hidden threads")
     .option("--json", "Print machine-readable JSON output")
@@ -98,8 +99,8 @@ export function registerListCommand(
           flagName: "--section",
           value: opts.section,
         });
-        const archived = opts.archived
-          ? true
+        const archived = opts.archived !== undefined
+          ? opts.archived
           : opts.includeArchived || threadIds.length > 0
             ? undefined
             : false;
