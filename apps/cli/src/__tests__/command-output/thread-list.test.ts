@@ -16,6 +16,30 @@ describe("bb thread list command output", () => {
   const register: CommandRegistrar = (program) =>
     registerThreadCommands(program, () => "http://server");
 
+  it.each([
+    { flags: [], archived: "false" },
+    { flags: ["--archived"], archived: "true" },
+    { flags: ["--no-archived"], archived: "false" },
+  ])(
+    "bb thread list preserves archive selection for $flags",
+    async ({ flags, archived }) => {
+      const list = vi.fn(async () => []);
+      stubServerApi({ "v1.threads.$get": list });
+
+      await runCommand(
+        ["thread", "list", ...flags, "--include-hidden", "--json"],
+        register,
+      );
+
+      expect(list).toHaveBeenCalledWith({
+        query: {
+          includeHidden: "true",
+          ...(archived === undefined ? {} : { archived }),
+        },
+      });
+    },
+  );
+
   it("bb thread list supports parent-thread filtering", async () => {
     const list = vi.fn(async () => []);
     stubServerApi({ "v1.threads.$get": list });
