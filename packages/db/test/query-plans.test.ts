@@ -62,9 +62,12 @@ import { getDatabaseMaintenanceActivity } from "../src/data/maintenance.js";
 import { replaceStoredProviderModelCatalog } from "../src/data/provider-model-catalogs.js";
 import { openSession } from "../src/data/sessions.js";
 import {
+  createQueuedThreadMessage,
+  getQueuedThreadMessage,
   listDueScheduledQueuedThreadMessages,
   listRetryableFailedQueuedThreadMessages,
   listQueuedThreadMessagesByWaitHolder,
+  supersedeQueuedRetriesInTransaction,
 } from "../src/data/queued-thread-messages.js";
 import { listEnvironments } from "../src/data/environments.js";
 import { upsertHost } from "../src/data/hosts.js";
@@ -235,6 +238,146 @@ function captureStatements(
   }
   return captured;
 }
+
+it("preserves queued retry acceptance when matching request ids as a set", () => {
+  const { db, project, thread } = setup();
+  try {
+    const otherThread = createThread(db, noopNotifier, {
+      projectId: project.id,
+      providerId: "codex",
+    });
+    const requestId = (value: number) =>
+      encodeClientTurnRequestIdNumber({ value });
+    const requests = [
+      { requestId: requestId(1) },
+      { requestId: requestId(2) },
+      { requestId: requestId(3) },
+      { requestId: requestId(4), retryOfRequestId: requestId(3) },
+      { requestId: requestId(5), retryOfRequestId: requestId(3) },
+      { requestId: requestId(6) },
+      { requestId: requestId(7), retryOfRequestId: requestId(6) },
+      { requestId: requestId(8), retryOfRequestId: requestId(7) },
+      { requestId: requestId(9) },
+      { requestId: requestId(10) },
+      { requestId: requestId(10) },
+      { retryOfRequestId: requestId(11) },
+      { requestId: null, retryOfRequestId: requestId(11) },
+    ];
+    const accepted = [1, 5, 8, 10, 12].map((value) => ({
+      clientRequestId: requestId(value),
+    }));
+    insertEvents(db, noopNotifier, [
+      ...requests.map((data, index) => ({
+        threadId: thread.id,
+        scope: threadScope(),
+        sequence: index + 1,
+        type: "client/turn/requested" as const,
+        itemId: null,
+        itemKind: null,
+        parentToolCallId: null,
+        data: JSON.stringify(data),
+      })),
+      ...[...accepted, {}, { clientRequestId: null }].map((data, index) => ({
+        threadId: thread.id,
+        scope: turnScope("accepted-turn"),
+        sequence: requests.length + index + 1,
+        type: "turn/input/accepted" as const,
+        itemId: null,
+        itemKind: null,
+        parentToolCallId: null,
+        data: JSON.stringify(data),
+      })),
+      {
+        threadId: otherThread.id,
+        scope: turnScope("other-turn"),
+        sequence: 1,
+        type: "turn/input/accepted",
+        itemId: null,
+        itemKind: null,
+        parentToolCallId: null,
+        data: JSON.stringify({ clientRequestId: requestId(9) }),
+      },
+      {
+        threadId: otherThread.id,
+        scope: threadScope(),
+        sequence: 2,
+        type: "client/turn/requested",
+        itemId: null,
+        itemKind: null,
+        parentToolCallId: null,
+        data: JSON.stringify({ requestId: requestId(12) }),
+      },
+    ]);
+    const supersede = () =>
+      db.transaction((tx) =>
+        supersedeQueuedRetriesInTransaction(tx, {
+          threadId: thread.id,
+          retryOfTurnRequestId: null,
+        }),
+      );
+    expect(supersede()).toBe(0);
+    const oldCheck = db.$client.prepare<string[], { sequence: number }>(`
+      SELECT accepted.sequence FROM events AS accepted
+      WHERE accepted.thread_id = ? AND accepted.type = 'turn/input/accepted'
+        AND EXISTS (
+          SELECT request.sequence FROM events AS request
+          WHERE request.thread_id = ? AND request.type = 'client/turn/requested'
+            AND json_extract(request.data, '$.requestId') = json_extract(accepted.data, '$.clientRequestId')
+            AND (json_extract(request.data, '$.requestId') = ?
+              OR json_extract(request.data, '$.retryOfRequestId') = ?)
+        )
+      LIMIT 1
+    `);
+    for (const [root, expected] of [
+      [1, true],
+      [2, false],
+      [3, true],
+      [6, false],
+      [9, false],
+      [10, true],
+      [11, false],
+      [12, false],
+    ] as const) {
+      const rootId = requestId(root);
+      const retry = createQueuedThreadMessage(db, noopNotifier, {
+        threadId: thread.id,
+        content: [],
+        model: "gpt-5",
+        reasoningLevel: "medium",
+        permissionMode: "full",
+        serviceTier: "default",
+        waitingOn: null,
+        sendAt: null,
+        payload: {
+          kind: "retry",
+          retryOfTurnRequestId: rootId,
+          attempt: 2,
+          reason: "Rate limited",
+        },
+        systemNotice: null,
+      });
+      const captured = captureStatements(db, () => {
+        expect(supersede()).toBe(1);
+      });
+      const check = captured.find(({ sql }) =>
+        sql.includes('from "events" "retry_chain_accepted"'),
+      );
+      if (!check) throw new Error("Expected queued retry acceptance SQL");
+      const wasAccepted =
+        oldCheck.get(thread.id, thread.id, rootId, rootId) !== undefined;
+      expect(wasAccepted).toBe(expected);
+      expect(
+        db.$client.prepare(check.sql).get(...check.params) !== undefined,
+      ).toBe(wasAccepted);
+      expect(getQueuedThreadMessage(db, retry.id)?.waitingOn ?? null).toEqual(
+        expected ? null : JSON.stringify({ kind: "superseded" }),
+      );
+      expect(getQueuedThreadMessage(db, retry.id) === null).toBe(expected);
+    }
+  } finally {
+    db.$client.close();
+  }
+});
 
 function queryPlanDetails(args: QueryPlanDetailsArgs): string {
   const planRows = args.db.$client
