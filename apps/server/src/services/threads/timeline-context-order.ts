@@ -8,6 +8,7 @@ import {
   getDatabaseDataVersion,
   getFirstParentedTimelineBoundarySequence,
   getThreadEventRewriteGeneration,
+  getThreadTimelineOrderingGeneration,
   getTimelineGroupingContextChangesInRange,
   listTimelineOrderingContext,
   type DbConnection,
@@ -45,7 +46,7 @@ type TimelineOrderingContextRow = ReturnType<
 
 interface TimelineOrderingContextLog {
   dataVersion: number;
-  generation: number;
+  orderingGeneration: number;
   rows: TimelineOrderingContextRow[];
   throughSequence: number;
 }
@@ -54,7 +55,8 @@ interface TimelineGroupingContextEntry {
   orderingContext: TimelineOrderingContext;
   context: TimelineGroupingContext;
   dataVersion: number;
-  generation: number;
+  orderingGeneration: number;
+  rewriteGeneration: number;
   maxSeq: number;
 }
 
@@ -95,7 +97,7 @@ function listOrderingContextRows(
   db: DbConnection,
   args: TimelineGroupingContextArgs,
   key: string,
-  generation: number,
+  orderingGeneration: number,
   dataVersion: number,
 ): readonly TimelineOrderingContextRow[] {
   let logs = orderingContextLogs.get(db);
@@ -107,12 +109,12 @@ function listOrderingContextRows(
   logs.delete(key);
   if (
     log === undefined ||
-    log.generation !== generation ||
+    log.orderingGeneration !== orderingGeneration ||
     log.dataVersion !== dataVersion
   ) {
     log = {
       dataVersion,
-      generation,
+      orderingGeneration,
       rows: [],
       throughSequence: args.sequenceStart - 1,
     };
@@ -160,11 +162,17 @@ function findReusableEntry(
   db: DbConnection,
   args: TimelineGroupingContextArgs,
   entries: readonly TimelineGroupingContextEntry[],
+  rewriteGeneration: number,
 ):
   | { entry: TimelineGroupingContextEntry; parentedChanged: boolean }
   | undefined {
   const exact = entries.find((entry) => entry.maxSeq === args.maxSeq);
-  if (exact !== undefined) return { entry: exact, parentedChanged: false };
+  if (exact !== undefined) {
+    return {
+      entry: exact,
+      parentedChanged: exact.rewriteGeneration !== rewriteGeneration,
+    };
+  }
   for (const side of ["below", "above"] as const) {
     const entry = nearestEntry(entries, args.maxSeq, side);
     if (entry === undefined) continue;
@@ -174,8 +182,10 @@ function findReusableEntry(
       throughSequence: Math.max(entry.maxSeq, args.maxSeq),
     });
     if (changes.ordering) continue;
-    if (!changes.parented && side === "below") entry.maxSeq = args.maxSeq;
-    return { entry, parentedChanged: changes.parented };
+    const parentedChanged =
+      changes.parented || entry.rewriteGeneration !== rewriteGeneration;
+    if (!parentedChanged && side === "below") entry.maxSeq = args.maxSeq;
+    return { entry, parentedChanged };
   }
   return undefined;
 }
@@ -190,14 +200,16 @@ export function getTimelineGroupingContext(
     orderingContexts.set(db, cache);
   }
   const key = JSON.stringify([args.threadId, args.sequenceStart]);
-  const generation = getThreadEventRewriteGeneration(args.threadId);
+  const orderingGeneration = getThreadTimelineOrderingGeneration(args.threadId);
+  const rewriteGeneration = getThreadEventRewriteGeneration(args.threadId);
   const dataVersion = getDatabaseDataVersion(db);
   const entries = (cache.get(key) ?? []).filter(
     (entry) =>
-      entry.generation === generation && entry.dataVersion === dataVersion,
+      entry.orderingGeneration === orderingGeneration &&
+      entry.dataVersion === dataVersion,
   );
   cache.delete(key);
-  const reusable = findReusableEntry(db, args, entries);
+  const reusable = findReusableEntry(db, args, entries, rewriteGeneration);
   if (reusable !== undefined && !reusable.parentedChanged) {
     cache.set(key, [
       reusable.entry,
@@ -208,7 +220,7 @@ export function getTimelineGroupingContext(
   const orderingContext =
     reusable?.entry.orderingContext ??
     computeTimelineOrderingContext(
-      listOrderingContextRows(db, args, key, generation, dataVersion),
+      listOrderingContextRows(db, args, key, orderingGeneration, dataVersion),
     );
   const parentedBoundary = getFirstParentedTimelineBoundarySequence(db, args);
   const context: TimelineGroupingContext = {
@@ -222,8 +234,19 @@ export function getTimelineGroupingContext(
         : (orderingContext.boundarySequence ?? parentedBoundary),
   };
   cache.set(key, [
-    { context, orderingContext, dataVersion, generation, maxSeq: args.maxSeq },
-    ...entries.slice(0, GROUPING_CONTEXT_ENTRIES_PER_KEY - 1),
+    {
+      context,
+      orderingContext,
+      dataVersion,
+      orderingGeneration,
+      rewriteGeneration,
+      maxSeq: args.maxSeq,
+    },
+    ...entries
+      .filter(
+        (entry) => entry !== reusable?.entry && entry.maxSeq !== args.maxSeq,
+      )
+      .slice(0, GROUPING_CONTEXT_ENTRIES_PER_KEY - 1),
   ]);
   if (cache.size > GROUPING_CONTEXT_KEY_LIMIT) {
     cache.delete(cache.keys().next().value!);

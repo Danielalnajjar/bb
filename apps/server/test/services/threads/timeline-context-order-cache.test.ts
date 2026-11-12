@@ -484,6 +484,130 @@ describe("timeline grouping context cache", () => {
     });
   });
 
+  it("retains cached ordering rows across non-ordering event pruning while refreshing parented boundaries", () => {
+    withTestThread((testThread) => {
+      const warmMaxSeq = appendRows(testThread, [
+        turnStarted("turn-1"),
+        userRequest("request-1"),
+        accepted("request-1", "turn-1"),
+        rootToolCall("call-1", "turn-1", "item/started"),
+        {
+          data: { delta: "child chunk 1", itemId: "child-msg-1" },
+          itemId: "child-msg-1",
+          parentToolCallId: "call-1",
+          turnId: "nested-call-1",
+          type: "item/agentMessage/delta",
+        },
+        turnCompleted("turn-1"),
+        userRequest("request-2"),
+        {
+          data: { delta: "child chunk 2", itemId: "child-msg-1" },
+          itemId: "child-msg-1",
+          parentToolCallId: "call-1",
+          turnId: "nested-call-1",
+          type: "item/agentMessage/delta",
+        },
+        delta("turn-1", "chunk-1"),
+        delta("turn-1", "chunk-2"),
+      ]);
+      expect(
+        expectCachedEqualsCold(testThread, warmMaxSeq).orderingBoundarySequence,
+      ).toBe(7);
+
+      const resolvedMaxSeq = appendRows(testThread, [
+        {
+          data: {
+            item: {
+              id: "child-msg-1",
+              text: "child chunk",
+              type: "agentMessage",
+            },
+          },
+          itemId: "child-msg-1",
+          itemKind: "agentMessage",
+          parentToolCallId: "call-1",
+          turnId: "nested-call-1",
+          type: "item/completed",
+        },
+        {
+          data: {
+            item: {
+              id: "message-1",
+              text: "chunk-1chunk-2",
+              type: "agentMessage",
+            },
+          },
+          itemId: "message-1",
+          itemKind: "agentMessage",
+          turnId: "turn-1",
+          type: "item/completed",
+        },
+        delta("turn-1", "tail"),
+      ]);
+
+      let removed = 0;
+      for (let pass = 0; pass < 10; pass += 1) {
+        const result = advanceThreadPruning(testThread.db, {
+          threadId: testThread.thread.id,
+        });
+        removed += result.removed;
+        if (result.action === "cycle-complete") break;
+      }
+      expect(removed).toBeGreaterThan(0);
+
+      const nearStatements = captureStatementSql(testThread.db, () => {
+        expect(
+          expectCachedEqualsCold(testThread, warmMaxSeq)
+            .orderingBoundarySequence,
+        ).toBeNull();
+        expectCachedEqualsCold(testThread, resolvedMaxSeq);
+      });
+      expect(
+        nearStatements.filter((source) =>
+          source.includes("'$.clientRequestId'"),
+        ),
+      ).toEqual([]);
+
+      const orderingQueryParams: unknown[][] = [];
+      const raw = testThread.db.$client;
+      const originalPrepare = raw.prepare.bind(raw);
+      Object.defineProperty(raw, "prepare", {
+        configurable: true,
+        writable: true,
+        value: (source: string) => {
+          const stmt = originalPrepare(source);
+          if (!source.includes("'$.clientRequestId'")) return stmt;
+          const originalAll = stmt.all.bind(stmt);
+          Object.defineProperty(stmt, "all", {
+            configurable: true,
+            value: (...params: unknown[]) => {
+              orderingQueryParams.push(params);
+              return originalAll(...params);
+            },
+          });
+          return stmt;
+        },
+      });
+      try {
+        const nextOrderingMaxSeq = appendRows(testThread, [
+          turnStarted("turn-2"),
+          userRequest("request-3"),
+          accepted("request-3", "turn-2"),
+        ]);
+        expectCachedEqualsCold(testThread, nextOrderingMaxSeq);
+      } finally {
+        Object.defineProperty(raw, "prepare", {
+          configurable: true,
+          writable: true,
+          value: originalPrepare,
+        });
+      }
+
+      expect(orderingQueryParams).toHaveLength(1);
+      expect(orderingQueryParams[0]?.[1]).toBe(warmMaxSeq + 1);
+    });
+  });
+
   it("matches a cold computation over randomized appends, rewrites and prunes", () => {
     let comparisons = 0;
     let changedContexts = 0;
