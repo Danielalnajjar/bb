@@ -41,8 +41,8 @@ export function resolveTimelineSnapshot(
   surface: string,
   requestedMaxSeq?: number,
 ): TimelineSnapshot {
+  const maxSeq = getLatestThreadSequence(db, { threadId: thread.id });
   if (page.kind === "latest") {
-    const maxSeq = getLatestThreadSequence(db, { threadId: thread.id });
     return {
       version: 3,
       threadId: thread.id,
@@ -64,7 +64,11 @@ export function resolveTimelineSnapshot(
           decoded.content.beforeSequence <= decoded.anchorSeq))
     )
       throw new Error("Cursor sequence mismatch");
-    if (snapshot.threadId !== thread.id || snapshot.surface !== surface) {
+    if (
+      snapshot.threadId !== thread.id ||
+      snapshot.surface !== surface ||
+      snapshot.maxSeq > maxSeq
+    ) {
       throw new Error("Stale snapshot");
     }
     return snapshot;
