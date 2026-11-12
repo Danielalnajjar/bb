@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { threadScope, turnScope } from "@bb/domain";
 import type { DbConnection } from "../../src/connection.js";
-import { getThreadEventRewriteGeneration } from "../../src/data/event-rewrite-generation.js";
+import {
+  getThreadEventRewriteGeneration,
+  getThreadTimelineOrderingGeneration,
+} from "../../src/data/event-rewrite-generation.js";
 import {
   appendDaemonEventsInTransaction,
   deleteThreadEventSuffixInTransaction,
@@ -27,6 +30,7 @@ import { createMigratedConnection } from "../../src/testing.js";
 
 interface RewriteCase {
   between?: (threadId: string) => InsertEventInput[];
+  bumpsOrdering: boolean;
   name: string;
   noop: (db: DbConnection, threadId: string) => number;
   rewrite: (db: DbConnection, threadId: string) => number;
@@ -70,6 +74,7 @@ function expectGenerationBump(
   db: DbConnection,
   threadId: string,
   bumped: boolean,
+  orderingBumped: boolean,
   mutate: () => void,
 ): void {
   upsertThreadConversationOutlineRecord(db, {
@@ -78,11 +83,15 @@ function expectGenerationBump(
     threadId,
   });
   const before = getThreadEventRewriteGeneration(threadId);
+  const orderingBefore = getThreadTimelineOrderingGeneration(threadId);
   mutate();
   expect(getThreadEventRewriteGeneration(threadId) !== before).toBe(bumped);
   expect(getThreadConversationOutlineRecord(db, threadId) === null).toBe(
     bumped,
   );
+  expect(
+    getThreadTimelineOrderingGeneration(threadId) !== orderingBefore,
+  ).toBe(orderingBumped);
 }
 
 function row(
@@ -215,6 +224,7 @@ describe("thread event rewrite generation", () => {
   it.each<RewriteCase>([
     {
       name: "a suffix delete",
+      bumpsOrdering: true,
       seed: (threadId) =>
         [1, 2, 3].map((sequence) => message(threadId, sequence)),
       noop: (db, threadId) => deleteSuffix(db, threadId, 10),
@@ -222,6 +232,7 @@ describe("thread event rewrite generation", () => {
     },
     {
       name: "a rate-limit snapshot prune",
+      bumpsOrdering: false,
       seed: (threadId) => [rateLimits(threadId, 1)],
       noop: (db) => pruneThreadEvents(db, "rate-limits"),
       between: (threadId) =>
@@ -230,6 +241,7 @@ describe("thread event rewrite generation", () => {
     },
     {
       name: "a resolved delta prune",
+      bumpsOrdering: false,
       seed: (threadId) =>
         [1, 2, 3].map((sequence) =>
           row(
@@ -260,6 +272,7 @@ describe("thread event rewrite generation", () => {
     },
     {
       name: "a background task progress prune",
+      bumpsOrdering: false,
       seed: (threadId) => [taskProgress(threadId, 1)],
       noop: (db) => pruneThreadEvents(db, "resolved-items"),
       between: (threadId) => [taskProgress(threadId, 2)],
@@ -272,15 +285,20 @@ describe("thread event rewrite generation", () => {
       message(otherThreadId, 1),
     ]);
 
-    expectGenerationBump(db, threadId, false, () => {
+    expectGenerationBump(db, threadId, false, false, () => {
       expect(testCase.noop(db, threadId)).toBe(0);
     });
     insertEvents(db, noopNotifier, testCase.between?.(threadId) ?? []);
     const otherBefore = getThreadEventRewriteGeneration(otherThreadId);
-    expectGenerationBump(db, threadId, true, () => {
+    const otherOrderingBefore =
+      getThreadTimelineOrderingGeneration(otherThreadId);
+    expectGenerationBump(db, threadId, true, testCase.bumpsOrdering, () => {
       expect(testCase.rewrite(db, threadId)).toBeGreaterThan(0);
     });
     expect(getThreadEventRewriteGeneration(otherThreadId)).toBe(otherBefore);
+    expect(getThreadTimelineOrderingGeneration(otherThreadId)).toBe(
+      otherOrderingBefore,
+    );
   });
 
   it.each([
@@ -299,7 +317,7 @@ describe("thread event rewrite generation", () => {
     ({ name, rows }) => {
       const { db, threadId } = setup();
       insertEvents(db, noopNotifier, [...rows(threadId), message(threadId, 5)]);
-      expectGenerationBump(db, threadId, false, () => {
+      expectGenerationBump(db, threadId, false, false, () => {
         expect(pruneThreadEvents(db, name)).toBeGreaterThan(0);
       });
     },
@@ -307,14 +325,14 @@ describe("thread event rewrite generation", () => {
 
   it("changes when a completed output is migrated and not when the scanned output fits", () => {
     const fits = setup();
-    expectGenerationBump(fits.db, fits.threadId, false, () => {
+    expectGenerationBump(fits.db, fits.threadId, false, false, () => {
       expect(insertCommandOutput(fits.db, fits.threadId, "small")).toBe(
         "scanned",
       );
     });
 
     const oversized = setup();
-    expectGenerationBump(oversized.db, oversized.threadId, true, () => {
+    expectGenerationBump(oversized.db, oversized.threadId, true, false, () => {
       expect(
         insertCommandOutput(
           oversized.db,
@@ -327,7 +345,7 @@ describe("thread event rewrite generation", () => {
 
   it("does not change for daemon appends, increasing inserts or ignored duplicates", () => {
     const { db, threadId } = setup();
-    expectGenerationBump(db, threadId, false, () => {
+    expectGenerationBump(db, threadId, false, false, () => {
       insertEvents(db, noopNotifier, [
         message(threadId, 1),
         message(threadId, 2),
@@ -370,7 +388,10 @@ describe("thread event rewrite generation", () => {
     };
     upsertThreadConversationOutlineRecord(db, otherOutline);
 
-    expectGenerationBump(db, threadId, true, () => {
+    const otherOrderingBefore =
+      getThreadTimelineOrderingGeneration(otherThreadId);
+
+    expectGenerationBump(db, threadId, true, true, () => {
       expect(
         insertEvents(db, noopNotifier, [
           message(otherThreadId, 1),
@@ -383,5 +404,8 @@ describe("thread event rewrite generation", () => {
       itemsJson: otherOutline.itemsJson,
       projectionKey: otherOutline.projectionKey,
     });
+    expect(getThreadTimelineOrderingGeneration(otherThreadId)).toBe(
+      otherOrderingBefore,
+    );
   });
 });
