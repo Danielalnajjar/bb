@@ -1979,12 +1979,21 @@ export function buildThreadConversationOutlineProjectionKey(
   options: BuildThreadConversationOutlineOptions,
 ): string {
   return JSON.stringify([
+    buildThreadConversationOutlineCheckpointKey(thread, options),
+    outlineSequence,
+    thread.status,
+  ]);
+}
+
+function buildThreadConversationOutlineCheckpointKey(
+  thread: Thread,
+  options: BuildThreadConversationOutlineOptions,
+): string {
+  return JSON.stringify([
     CONVERSATION_OUTLINE_PROJECTION_VERSION,
     getThreadEventRewriteGeneration(thread.id),
-    outlineSequence,
     thread.providerId,
     options.providerDisplayName ?? null,
-    thread.status,
     thread.title,
     thread.titleFallback,
     options.completedTurnDisplay,
@@ -2044,7 +2053,7 @@ export function loadThreadConversationOutline(
         items: projectConversationOutlineIncrementally({
           db,
           threadId: thread.id,
-          key: buildThreadConversationOutlineProjectionKey(thread, 0, options),
+          key: buildThreadConversationOutlineCheckpointKey(thread, options),
           maxSeq: options.maxSeq,
           historySequenceStart,
           orderingBoundarySequence,
@@ -2053,6 +2062,9 @@ export function loadThreadConversationOutline(
               threadId: thread.id,
               sequenceStart: historySequenceStart,
               classificationSequenceStart,
+              knownIncludeNestedEvents:
+                orderingBoundarySequence !== null ||
+                previous?.includeNestedEvents === true,
               summaryCompactionDeltaThreshold:
                 MIN_AGENT_MESSAGE_DELTAS_FOR_SUMMARY_COMPACTION,
             });

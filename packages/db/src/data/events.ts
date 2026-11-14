@@ -3152,10 +3152,13 @@ export function getStoredConversationOutlineProjectionState(
   db: DbConnection,
   args: ListStoredConversationOutlineEventRowsArgs & {
     classificationSequenceStart: number;
+    knownIncludeNestedEvents: boolean;
     summaryCompactionDeltaThreshold: number;
   },
 ) {
-  const crossTurnState = db
+  const crossTurnState = args.knownIncludeNestedEvents
+    ? undefined
+    : db
     .select({ sequence: events.sequence })
     .from(events)
     .where(
@@ -3175,7 +3178,10 @@ export function getStoredConversationOutlineProjectionState(
     )
     .limit(1)
     .get();
-  const acceptedNestedRoot = db
+  const acceptedNestedRoot =
+    args.knownIncludeNestedEvents || crossTurnState !== undefined
+      ? undefined
+      : db
     .select({ found: sql<number>`1` })
     .from(sql`${events} INDEXED BY events_thread_type_sequence_idx`)
     .where(
@@ -3222,7 +3228,9 @@ export function getStoredConversationOutlineProjectionState(
     .get();
   return {
     includeNestedEvents:
-      crossTurnState !== undefined || acceptedNestedRoot !== undefined,
+      args.knownIncludeNestedEvents ||
+      crossTurnState !== undefined ||
+      acceptedNestedRoot !== undefined,
     summaryCompactionEnabled: compactionDelta !== undefined,
   };
 }
