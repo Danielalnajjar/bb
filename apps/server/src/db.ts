@@ -1,4 +1,9 @@
-import { createConnection, ensurePersonalProject, migrate } from "@bb/db";
+import {
+  createConnection,
+  ensurePersonalProject,
+  initializeLocalTurnRequestIndex,
+  migrate,
+} from "@bb/db";
 import type {
   DbConnection,
   MigrationWarningLogger,
@@ -12,7 +17,7 @@ import {
 
 type InitDbLogger = MigrationWarningLogger &
   SlowDbQueryLogger &
-  Pick<Logger, "error" | "info">;
+  Pick<Logger, "error" | "info" | "warn">;
 
 interface InitDbOptions {
   dataDir?: string;
@@ -44,6 +49,7 @@ export function initDb(
     }
     migrate(db, { logger: options.logger });
     ensurePersonalProject(db);
+    initializeLocalTurnRequestIndex(db, options.logger);
   } catch (error) {
     db.$client.close();
     throw error;

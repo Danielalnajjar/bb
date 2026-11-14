@@ -1,3 +1,4 @@
+import { hasLocalTurnRequestIndex } from "../local-turn-request-index.js";
 import { markThreadPruningWork } from "./thread-pruning-work.js";
 import { isBeforeLatestThreadEvent } from "./event-pruning-guards.js";
 import { acquireProjectAttachmentOwnership } from "./project-attachments.js";
@@ -1862,9 +1863,11 @@ export function listStoredClientTurnRequestRowsByKeys(
         requestIds.push(key.requestId);
         requestIdsByThread.set(key.threadId, requestIds);
       }
+      const indexed = hasLocalTurnRequestIndex(db);
       const keyConditions = [...requestIdsByThread].map(
         ([threadId, requestIds]) =>
           and(
+            indexed ? sql`${events.type} = 'client/turn/requested'` : undefined,
             eq(events.threadId, threadId),
             inArray(
               sql<string>`json_extract(${events.data}, '$.requestId')`,
@@ -1873,9 +1876,11 @@ export function listStoredClientTurnRequestRowsByKeys(
           ),
       );
       return db
-        .select(storedEventRowFields)
-        .from(events)
-        .where(and(eq(events.type, requestType), or(...keyConditions)))
+        .select(storedEventRowSqlFields(null))
+        .from(indexed
+          ? sql`${events} INDEXED BY local_bb_turn_request_thread_request_sequence_idx`
+          : events)
+        .where(indexed ? or(...keyConditions) : and(eq(events.type, requestType), or(...keyConditions)))
         .orderBy(events.threadId, events.sequence)
         .all();
     },
