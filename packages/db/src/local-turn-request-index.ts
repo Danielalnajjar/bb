@@ -21,18 +21,7 @@ export function initializeLocalTurnRequestIndex(
       WHERE type = 'index' AND tbl_name = 'events'
         AND name = 'local_bb_turn_request_thread_request_sequence_idx'
     `);
-    if (findIndex.get() === undefined) {
-      db.$client
-        .transaction(() => {
-          db.$client.exec(`
-          CREATE INDEX IF NOT EXISTS local_bb_turn_request_thread_request_sequence_idx
-          ON events (thread_id, json_extract(data, '$.requestId'), sequence)
-          WHERE type = 'client/turn/requested'
-        `);
-        })
-        .immediate();
-    }
-    indexedConnections.add(db);
+    if (findIndex.get() !== undefined) indexedConnections.add(db);
   } catch (error) {
     const code =
       error instanceof Error &&
