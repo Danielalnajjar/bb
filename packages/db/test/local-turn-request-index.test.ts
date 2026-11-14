@@ -99,6 +99,9 @@ describe("local turn-request index", () => {
     const journal = db.$client
       .prepare("SELECT * FROM __drizzle_migrations")
       .all();
+    db.$client.exec(
+      `CREATE INDEX local_bb_turn_request_thread_request_sequence_idx ON events(thread_id, json_extract(data, '$.requestId'), sequence) WHERE type='client/turn/requested'`,
+    );
     initializeLocalTurnRequestIndex(db);
     initializeLocalTurnRequestIndex(db);
     expect(listStoredClientTurnRequestRowsByKeys(db, { keys })).toEqual(
@@ -149,86 +152,26 @@ describe("local turn-request index", () => {
     ).toHaveLength(2);
   });
 
-  it("continues using the original lookup when another writer prevents startup index creation", () => {
+  it("keeps startup read-only with a missing index and a competing writer", () => {
     const { db, keys } = setup(true);
     const baseline = listStoredClientTurnRequestRowsByKeys(db, { keys });
     const writer = new Database(db.$client.name);
     writer.exec("BEGIN IMMEDIATE");
-    db.$client.pragma("busy_timeout = 1");
-    const codes: string[] = [];
     try {
-      initializeLocalTurnRequestIndex(db, {
-        warn: (fields) => codes.push(fields.code),
-      });
-      expect(codes).toEqual(["SQLITE_BUSY"]);
+      initializeLocalTurnRequestIndex(db);
       expect(listStoredClientTurnRequestRowsByKeys(db, { keys })).toEqual(
         baseline,
       );
+      expect(
+        db.$client
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE name = 'local_bb_turn_request_thread_request_sequence_idx'",
+          )
+          .get(),
+      ).toBeUndefined();
     } finally {
       writer.exec("ROLLBACK");
       writer.close();
     }
-    expect(db.$client.inTransaction).toBe(false);
-  });
-
-  it("continues using the original lookup when index creation runs out of pages", () => {
-    const { db, keys } = setup(true);
-    const baseline = listStoredClientTurnRequestRowsByKeys(db, { keys });
-    db.$client.exec("CREATE TABLE fill_space (data BLOB)");
-    while (Number(db.$client.pragma("freelist_count", { simple: true })) > 0) {
-      db.$client.exec("INSERT INTO fill_space VALUES (zeroblob(4096))");
-    }
-    const pages = db.$client.pragma("page_count", { simple: true });
-    db.$client.pragma(`max_page_count = ${pages}`);
-    const codes: string[] = [];
-    initializeLocalTurnRequestIndex(db, {
-      warn: (fields) => codes.push(fields.code),
-    });
-    expect(codes).toEqual(["SQLITE_FULL"]);
-    expect(db.$client.inTransaction).toBe(false);
-    expect(listStoredClientTurnRequestRowsByKeys(db, { keys })).toEqual(
-      baseline,
-    );
-    expect(
-      db.$client
-        .prepare(
-          "SELECT name FROM sqlite_master WHERE name = 'local_bb_turn_request_thread_request_sequence_idx'",
-        )
-        .get(),
-    ).toBeUndefined();
-  });
-
-  it("continues using the original lookup when expression evaluation interrupts the index build", () => {
-    const { db, keys } = setup();
-    const baseline = listStoredClientTurnRequestRowsByKeys(db, { keys });
-    let interrupted = false;
-    db.$client.function(
-      "json_extract",
-      { deterministic: true },
-      (value, path) => {
-        if (!interrupted) {
-          interrupted = true;
-          throw new Database.SqliteError("interrupted", "SQLITE_INTERRUPT");
-        }
-        const data = JSON.parse(String(value)) as { requestId?: string };
-        return path === "$.requestId" ? (data.requestId ?? null) : null;
-      },
-    );
-    const codes: string[] = [];
-    initializeLocalTurnRequestIndex(db, {
-      warn: (fields) => codes.push(fields.code),
-    });
-    expect(codes).toEqual(["SQLITE_INTERRUPT"]);
-    expect(db.$client.inTransaction).toBe(false);
-    expect(listStoredClientTurnRequestRowsByKeys(db, { keys })).toEqual(
-      baseline,
-    );
-    expect(
-      db.$client
-        .prepare(
-          "SELECT name FROM sqlite_master WHERE name = 'local_bb_turn_request_thread_request_sequence_idx'",
-        )
-        .get(),
-    ).toBeUndefined();
   });
 });
