@@ -489,7 +489,8 @@ describe("incremental conversation outlines", () => {
           ["active", [delta("live", " continued")]],
           ["idle", [message("live", "Finished"), completed("live")]],
           ["active", backgroundTurn(100)],
-          ["error", [started("next"), delta("next", "Next")]],
+          ["active", [started("next"), delta("next", "Next")]],
+          ["error", []],
         ] as const) {
           testThread.thread = { ...testThread.thread, status };
           appendRows(testThread, [...rows]);
@@ -527,7 +528,11 @@ describe("incremental conversation outlines", () => {
           backgroundTask(null, "late-task", update),
           delta("live", " after task"),
         ]);
-        expectMatchesFull(testThread);
+        const selected = countSelectedEventRows(testThread, () =>
+          expectMatchesFull(testThread),
+        );
+        if (update === "completed") expect(selected).toBeLessThan(25);
+        else expect(selected).toBeGreaterThan(100);
         appendRows(testThread, [message("live", "Done"), completed("live")]);
         expectMatchesFull(testThread);
       });

@@ -3278,60 +3278,60 @@ export function getStoredConversationOutlineProjectionState(
   const crossTurnState = args.knownIncludeNestedEvents
     ? undefined
     : db
-    .select({ sequence: events.sequence })
-    .from(events)
-    .where(
-      and(
-        eq(events.threadId, args.threadId),
-        gte(events.sequence, args.classificationSequenceStart),
-        inArray(events.type, [
-          "item/started",
-          "item/completed",
-          "item/backgroundTask/progress",
-          "item/backgroundTask/completed",
-          "item/delegation/progress",
-          "item/delegation/completed",
-        ]),
-        inArray(events.itemKind, ["backgroundTask", "delegation"]),
-      ),
-    )
-    .limit(1)
-    .get();
+      .select({ sequence: events.sequence })
+      .from(events)
+      .where(
+        and(
+          eq(events.threadId, args.threadId),
+          gte(events.sequence, args.classificationSequenceStart),
+          inArray(events.type, [
+            "item/started",
+            "item/completed",
+            "item/backgroundTask/progress",
+            "item/backgroundTask/completed",
+            "item/delegation/progress",
+            "item/delegation/completed",
+          ]),
+          inArray(events.itemKind, ["backgroundTask", "delegation"]),
+        ),
+      )
+      .limit(1)
+      .get();
   const acceptedNestedRoot =
     args.knownIncludeNestedEvents || crossTurnState !== undefined
       ? undefined
       : db
-    .select({ found: sql<number>`1` })
-    .from(sql`${events} INDEXED BY events_thread_type_sequence_idx`)
-    .where(
-      and(
-        eq(events.threadId, args.threadId),
-        gte(events.sequence, args.classificationSequenceStart),
-        inArray(events.type, ["turn/input/accepted", "turn/started"]),
-        sql`EXISTS (
-          SELECT 1 FROM events AS nested_start
-            INDEXED BY events_thread_turn_type_item_sequence_idx
-          WHERE nested_start.thread_id = ${events.threadId}
-            AND nested_start.turn_id = ${events.turnId}
-            AND nested_start.type = 'turn/started'
-            AND nested_start.parent_tool_call_id IS NOT NULL
-        ) AND EXISTS (
-          SELECT 1 FROM events AS accepted_root
-          WHERE accepted_root.thread_id = ${events.threadId}
-            AND accepted_root.turn_id = ${events.turnId}
-            AND accepted_root.type = 'turn/input/accepted'
-            AND EXISTS (
-              SELECT 1 FROM events AS root_request
-              WHERE root_request.thread_id = accepted_root.thread_id
-                AND root_request.type = 'client/turn/requested'
-                AND json_extract(root_request.data, '$.requestId') = json_extract(accepted_root.data, '$.clientRequestId')
-                AND json_extract(root_request.data, '$.target.kind') IN ('new-turn', 'thread-start')
-            )
-        )`,
-      ),
-    )
-    .limit(1)
-    .get();
+        .select({ found: sql<number>`1` })
+        .from(sql`${events} INDEXED BY events_thread_type_sequence_idx`)
+        .where(
+          and(
+            eq(events.threadId, args.threadId),
+            gte(events.sequence, args.classificationSequenceStart),
+            inArray(events.type, ["turn/input/accepted", "turn/started"]),
+            sql`EXISTS (
+              SELECT 1 FROM events AS nested_start
+                INDEXED BY events_thread_turn_type_item_sequence_idx
+              WHERE nested_start.thread_id = ${events.threadId}
+                AND nested_start.turn_id = ${events.turnId}
+                AND nested_start.type = 'turn/started'
+                AND nested_start.parent_tool_call_id IS NOT NULL
+            ) AND EXISTS (
+              SELECT 1 FROM events AS accepted_root
+              WHERE accepted_root.thread_id = ${events.threadId}
+                AND accepted_root.turn_id = ${events.turnId}
+                AND accepted_root.type = 'turn/input/accepted'
+                AND EXISTS (
+                  SELECT 1 FROM events AS root_request
+                  WHERE root_request.thread_id = accepted_root.thread_id
+                    AND root_request.type = 'client/turn/requested'
+                    AND json_extract(root_request.data, '$.requestId') = json_extract(accepted_root.data, '$.clientRequestId')
+                    AND json_extract(root_request.data, '$.target.kind') IN ('new-turn', 'thread-start')
+                )
+            )`,
+          ),
+        )
+        .limit(1)
+        .get();
   const compactionDelta = db
     .select({ sequence: events.sequence })
     .from(events)
