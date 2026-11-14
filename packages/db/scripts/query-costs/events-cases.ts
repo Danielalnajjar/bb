@@ -1056,6 +1056,7 @@ export const EVENTS_COST_CASES: readonly QueryCostCase[] = [
     run: (db, fixture) =>
       getStoredConversationOutlineProjectionState(db, {
         classificationSequenceStart: 0,
+        knownIncludeNestedEvents: false,
         sequenceStart: 0,
         summaryCompactionDeltaThreshold: 1_000,
         threadId: fixture.threadId,

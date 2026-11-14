@@ -485,13 +485,14 @@ describe("incremental conversation outlines", () => {
           delta("live", "Live"),
         ]);
         expectMatchesFull(testThread, display);
-        for (const rows of [
-          [delta("live", " continued")],
-          [message("live", "Finished"), completed("live")],
-          backgroundTurn(100),
-          [started("next"), delta("next", "Next")],
-        ]) {
-          appendRows(testThread, rows);
+        for (const [status, rows] of [
+          ["active", [delta("live", " continued")]],
+          ["idle", [message("live", "Finished"), completed("live")]],
+          ["active", backgroundTurn(100)],
+          ["error", [started("next"), delta("next", "Next")]],
+        ] as const) {
+          testThread.thread = { ...testThread.thread, status };
+          appendRows(testThread, [...rows]);
           const selected = countSelectedEventRows(testThread, () =>
             expectMatchesFull(testThread, display),
           );
