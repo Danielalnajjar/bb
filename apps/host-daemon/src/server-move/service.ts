@@ -676,8 +676,8 @@ export class ServerMoveService {
     });
     await discardImportBackups(dataDir);
     await removeServerConnectHoldFile(dataDir);
-    await rm(join(dataDir, SERVER_MOVED_FILE_NAME), { force: true });
     await rm(join(dataDir, SERVER_IMPORT_FILE_NAME), { force: true });
+    await rm(join(dataDir, SERVER_MOVED_FILE_NAME), { force: true });
     this.options.logger.info(
       { moveId: state.moveId, plan: plan.kind },
       "Activated the imported bb server; switching this machine to run it",
