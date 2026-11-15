@@ -502,34 +502,43 @@ describe("activation resume", () => {
     });
   });
 
-  it("only drops the activation record when this daemon already runs next to the activated server", async () => {
-    const fixture = await createFixture();
-    const serverPort = 39_123;
-    await writeIncomingMoveState(fixture.dataDir, {
-      version: 1,
-      moveId: MOVE_ID,
-      activationToken: "activation-token-0123456789",
-      serverPort,
-      bindHost: null,
-      importedEntries: ["bb.db"],
-      archivedServerData: null,
-      pendingServer: { pid: 999_998, localServerUrl: "http://127.0.0.1:1" },
-      preparedAt: 1,
-      activation: { lastMove, plan: "service", requestedAt: 1 },
-    });
-    const colocated = fixture.createService({
-      serverUrl: `http://127.0.0.1:${serverPort}`,
-    });
+  it.each([false, true])(
+    "finishes colocated activation without restarting when a previous moved marker exists: %s",
+    async (previousMove) => {
+      const fixture = await createFixture();
+      const serverPort = 39_123;
+      await writeIncomingMoveState(fixture.dataDir, {
+        version: 1,
+        moveId: MOVE_ID,
+        activationToken: "activation-token-0123456789",
+        serverPort,
+        bindHost: null,
+        importedEntries: ["bb.db"],
+        archivedServerData: null,
+        pendingServer: { pid: 999_998, localServerUrl: "http://127.0.0.1:1" },
+        preparedAt: 1,
+        activation: { lastMove, plan: "service", requestedAt: 1 },
+      });
+      if (previousMove) {
+        await writePreviousMove(fixture);
+      }
+      const colocated = fixture.createService({
+        serverUrl: `http://127.0.0.1:${serverPort}`,
+      });
 
-    await colocated.resumeActivation();
+      await colocated.resumeActivation();
 
-    expect(await exists(join(fixture.dataDir, "server-move-incoming"))).toBe(
-      false,
-    );
-    expect(fixture.commands).toEqual([]);
-    expect(fixture.shutdownRequests).toEqual([]);
-    expect(fixture.detachedRequests).toEqual([]);
-  });
+      expect(await exists(join(fixture.dataDir, "server-moved.json"))).toBe(
+        false,
+      );
+      expect(await exists(join(fixture.dataDir, "server-move-incoming"))).toBe(
+        false,
+      );
+      expect(fixture.commands).toEqual([]);
+      expect(fixture.shutdownRequests).toEqual([]);
+      expect(fixture.detachedRequests).toEqual([]);
+    },
+  );
 });
 
 describe("server move redirects during a move", () => {
