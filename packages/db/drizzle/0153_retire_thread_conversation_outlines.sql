@@ -1,1 +1,0 @@
-DROP TABLE IF EXISTS `thread_conversation_outlines`;
