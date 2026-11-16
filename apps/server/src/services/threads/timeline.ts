@@ -47,7 +47,6 @@ import type {
   ThreadEventItemType,
 } from "@bb/domain";
 import type {
-  ThreadConversationOutlineItem,
   ThreadConversationOutlineResponse,
   TimelineConversationAttachments,
   ThreadConversationOutlineAttachmentSummary,
@@ -58,11 +57,7 @@ import type {
   ThreadTimelineResponse,
   TimelineTurnSummaryDetailsResponse,
 } from "@bb/server-contract";
-import {
-  mapTimelineRowTree,
-  threadConversationOutlineItemSchema,
-  timelineRowChildren,
-} from "@bb/server-contract";
+import { mapTimelineRowTree, timelineRowChildren } from "@bb/server-contract";
 import {
   findStoredTimelineWindowByteBudgetFloor,
   findTimelineWindowBudgetFloorSequence,
@@ -70,7 +65,6 @@ import {
   hydrateRetainedEventOutputRowsWithinDataByteLimit,
   getEnvironment,
   getLatestCompletedThreadContextClearSequence,
-  getThreadConversationOutlineRecord,
   getThreadEventRewriteGeneration,
   listContextWindowUsageRows,
   isTimelineCursorSequencePresent,
@@ -100,7 +94,6 @@ import {
   listStoredTurnStartedRowsByTurnIdsUpToSequence,
   listTimelineWindowHintsDescending,
   scopedItemRefKey,
-  upsertThreadConversationOutlineRecord,
 } from "@bb/db";
 import type {
   DbConnection,
@@ -1698,21 +1691,16 @@ export function buildThreadTimelineWithProfile(
   );
 }
 
-interface BuildThreadConversationOutlineOptions {
+export interface BuildThreadConversationOutlineOptions {
+  eventRewriteGeneration?: number;
   completedTurnDisplay: CompletedTurnDisplay;
   includeClearedContextHistory: boolean;
   maxSeq: number;
   providerDisplayName?: string;
 }
 
-interface LoadThreadConversationOutlineOptions extends BuildThreadConversationOutlineOptions {
-  outlineSequence: number;
-}
-
 const CONVERSATION_OUTLINE_PREVIEW_MAX_LENGTH = 200;
 const CONVERSATION_OUTLINE_PROJECTION_VERSION = 2;
-const conversationOutlineItemsSchema =
-  threadConversationOutlineItemSchema.array();
 
 function toConversationOutlinePreview(text: string): string {
   let prefixLength = CONVERSATION_OUTLINE_PREVIEW_MAX_LENGTH * 2;
@@ -1975,12 +1963,12 @@ export function getThreadMessage(
 
 export function buildThreadConversationOutlineProjectionKey(
   thread: Thread,
-  outlineSequence: number,
+  outlineGeneration: number,
   options: BuildThreadConversationOutlineOptions,
 ): string {
   return JSON.stringify([
     buildThreadConversationOutlineCheckpointKey(thread, options),
-    outlineSequence,
+    outlineGeneration,
     thread.status,
   ]);
 }
@@ -1991,7 +1979,8 @@ function buildThreadConversationOutlineCheckpointKey(
 ): string {
   return JSON.stringify([
     CONVERSATION_OUTLINE_PROJECTION_VERSION,
-    getThreadEventRewriteGeneration(thread.id),
+    options.eventRewriteGeneration ??
+      getThreadEventRewriteGeneration(thread.id),
     thread.providerId,
     options.providerDisplayName ?? null,
     thread.title,
@@ -2001,105 +1990,64 @@ function buildThreadConversationOutlineCheckpointKey(
   ]);
 }
 
-function parseThreadConversationOutlineItems(
-  itemsJson: string,
-): ThreadConversationOutlineItem[] | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(itemsJson);
-  } catch {
-    return null;
-  }
-  const result = conversationOutlineItemsSchema.safeParse(parsed);
-  return result.success ? result.data : null;
-}
-
-function shouldMaterializeThreadConversationOutline(thread: Thread): boolean {
-  return thread.status === "idle" || thread.status === "error";
-}
-
 export function loadThreadConversationOutline(
   db: DbConnection,
   thread: Thread,
-  options: LoadThreadConversationOutlineOptions,
+  options: BuildThreadConversationOutlineOptions,
 ): ThreadConversationOutlineResponse {
-  const projectionKey = buildThreadConversationOutlineProjectionKey(
-    thread,
-    options.outlineSequence,
-    options,
-  );
-  const stored = getThreadConversationOutlineRecord(db, thread.id);
-  if (stored?.projectionKey === projectionKey) {
-    const items = parseThreadConversationOutlineItems(stored.itemsJson);
-    if (items !== null) {
-      return { items, maxSeq: options.maxSeq };
-    }
-  }
-
-  const response = runEventLoopWorkSync(
-    `conversation-outline ${thread.id}`,
-    () => {
-      const historySequenceStart = resolveConversationHistorySequenceStart(
-        db,
-        thread,
-        options,
-      );
-      const { orderingBoundarySequence } = getTimelineGroupingContext(db, {
-        maxSeq: options.maxSeq,
-        sequenceStart: historySequenceStart,
-        threadId: thread.id,
-      });
-      return {
-        items: projectConversationOutlineIncrementally({
-          db,
-          threadId: thread.id,
-          key: buildThreadConversationOutlineCheckpointKey(thread, options),
-          maxSeq: options.maxSeq,
-          historySequenceStart,
-          orderingBoundarySequence,
-          resolveProjectionState: (classificationSequenceStart, previous) => {
-            const state = getStoredConversationOutlineProjectionState(db, {
-              threadId: thread.id,
-              sequenceStart: historySequenceStart,
-              classificationSequenceStart,
-              knownIncludeNestedEvents:
-                orderingBoundarySequence !== null ||
-                previous?.includeNestedEvents === true,
-              summaryCompactionDeltaThreshold:
-                MIN_AGENT_MESSAGE_DELTAS_FOR_SUMMARY_COMPACTION,
-            });
-            return {
-              includeNestedEvents:
-                orderingBoundarySequence !== null ||
-                previous?.includeNestedEvents === true ||
-                state.includeNestedEvents,
-              summaryCompactionEnabled: state.summaryCompactionEnabled,
-            };
-          },
-          select: (sequenceStart, precedingAgentMessageDeltaCount, state) =>
-            selectThreadConversationOutline(
-              db,
-              thread,
-              options,
-              sequenceStart,
-              precedingAgentMessageDeltaCount,
-              state.includeNestedEvents
-                ? null
-                : { summaryCompactionEnabled: state.summaryCompactionEnabled },
-            ),
-        }),
-        maxSeq: options.maxSeq,
-      };
-    },
-  );
-  if (shouldMaterializeThreadConversationOutline(thread)) {
-    upsertThreadConversationOutlineRecord(db, {
-      itemsJson: JSON.stringify(response.items),
-      projectionKey,
+  return runEventLoopWorkSync(`conversation-outline ${thread.id}`, () => {
+    const historySequenceStart = resolveConversationHistorySequenceStart(
+      db,
+      thread,
+      options,
+    );
+    const { orderingBoundarySequence } = getTimelineGroupingContext(db, {
+      maxSeq: options.maxSeq,
+      sequenceStart: historySequenceStart,
       threadId: thread.id,
     });
-  }
-  return response;
+    return {
+      items: projectConversationOutlineIncrementally({
+        db,
+        threadId: thread.id,
+        key: buildThreadConversationOutlineCheckpointKey(thread, options),
+        maxSeq: options.maxSeq,
+        historySequenceStart,
+        orderingBoundarySequence,
+        resolveProjectionState: (classificationSequenceStart, previous) => {
+          const state = getStoredConversationOutlineProjectionState(db, {
+            threadId: thread.id,
+            sequenceStart: historySequenceStart,
+            classificationSequenceStart,
+            knownIncludeNestedEvents:
+              orderingBoundarySequence !== null ||
+              previous?.includeNestedEvents === true,
+            summaryCompactionDeltaThreshold:
+              MIN_AGENT_MESSAGE_DELTAS_FOR_SUMMARY_COMPACTION,
+          });
+          return {
+            includeNestedEvents:
+              orderingBoundarySequence !== null ||
+              previous?.includeNestedEvents === true ||
+              state.includeNestedEvents,
+            summaryCompactionEnabled: state.summaryCompactionEnabled,
+          };
+        },
+        select: (sequenceStart, precedingAgentMessageDeltaCount, state) =>
+          selectThreadConversationOutline(
+            db,
+            thread,
+            options,
+            sequenceStart,
+            precedingAgentMessageDeltaCount,
+            state.includeNestedEvents
+              ? null
+              : { summaryCompactionEnabled: state.summaryCompactionEnabled },
+          ),
+      }),
+      maxSeq: options.maxSeq,
+    };
+  });
 }
 
 function collectTimelineItemRows(

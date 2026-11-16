@@ -1,3 +1,4 @@
+export { getConversationOutlineGeneration } from "./conversation-outline-generation.js";
 export {
   createProject,
   ensurePersonalProject,
@@ -13,11 +14,6 @@ export {
   deleteProject,
 } from "./projects.js";
 export type { ReorderProjectResult } from "./projects.js";
-
-export {
-  getThreadConversationOutlineRecord,
-  upsertThreadConversationOutlineRecord,
-} from "./thread-conversation-outlines.js";
 
 export {
   createThreadSection,
@@ -119,6 +115,7 @@ export type {
   ReorderPinnedThreadResult,
   RunningThreadRow,
   ThreadSearchResultGroup,
+  ThreadSearchResults,
   ThreadWithPendingInteractionState,
   ThreadExecutionOverride,
   UpdateThreadInput,
@@ -330,7 +327,6 @@ export {
   listLatestTurnFinalAgentMessageEventRows,
   getTurnFinalAgentMessageEventRow,
   getStoredTurnRequestEventForTurn,
-  getLatestStoredConversationOutlineSequence,
   getLatestCompletedThreadContextClearSequence,
   getLatestThreadSystemErrorEventRow,
   getLatestThreadSequence,

@@ -2,12 +2,13 @@ import { extractThreadContextWindowUsage } from "@bb/thread-view";
 import {
   getAppSettings,
   getDatabaseDataVersion,
+  getConversationOutlineGeneration,
   getThreadPluginMetadata,
   patchThreadPluginMetadata,
   getLatestCompletedThreadContextClearSequence,
   listContextWindowUsageRows,
   getLatestThreadSequence,
-  getLatestStoredConversationOutlineSequence,
+  getThreadEventRewriteGeneration,
   listQueuedThreadMessages,
 } from "@bb/db";
 import type { Hono } from "hono";
@@ -22,12 +23,12 @@ import {
   THREAD_EVENT_LIST_PAGE_SIZE,
   typedRoutes,
   type PublicApiSchema,
-  type ThreadConversationOutlineResponse,
   type ThreadTimelineQuery,
 } from "@bb/server-contract";
 import type { AppDeps } from "../../types.js";
 import { COMMAND_TIMEOUT_MS } from "../../constants.js";
 import { ApiError } from "../../errors.js";
+import { readThreadData } from "../../services/threads/thread-reads.js";
 import { requirePublicThread } from "../../services/lib/entity-lookup.js";
 import { callHostRetryableOnlineRpc } from "../../services/hosts/online-rpc.js";
 import { requireThreadStorageTarget } from "../../services/threads/thread-storage.js";
@@ -41,7 +42,6 @@ import {
   buildThreadConversationOutlineProjectionKey,
   getThreadMessage,
   buildTimelineTurnSummaryDetails,
-  loadThreadConversationOutline,
   THREAD_TIMELINE_DEFAULT_SEGMENT_LIMIT,
   THREAD_TIMELINE_SEGMENT_LIMIT_MAX,
 } from "../../services/threads/timeline.js";
@@ -146,6 +146,24 @@ function parseThreadTimelinePage(
   };
 }
 
+function outlineBody(
+  cached: { bytes: Uint8Array<ArrayBuffer>; maxSeq: number },
+  maxSeq: number,
+): ReadableStream<Uint8Array<ArrayBuffer>> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(
+        cached.bytes.subarray(
+          0,
+          cached.bytes.length - String(cached.maxSeq).length - 1,
+        ),
+      );
+      controller.enqueue(new TextEncoder().encode(`${maxSeq}}`));
+      controller.close();
+    },
+  });
+}
+
 export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
   const { get, patch } = typedRoutes<PublicApiSchema>(app, {
     onValidationError: (msg) => new ApiError(400, "invalid_request", msg),
@@ -154,7 +172,11 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
   const timelineWindows = createThreadTimelineWindows(deps);
   const conversationOutlineCache = new Map<
     string,
-    { key: string; items: ThreadConversationOutlineResponse["items"] }
+    { key: string; bytes: Uint8Array<ArrayBuffer>; maxSeq: number }
+  >();
+  const pendingConversationOutlines = new Map<
+    string,
+    ReturnType<typeof readThreadData>
   >();
   const CONVERSATION_OUTLINE_CACHE_MAX_ENTRIES = 128;
   const resolveConversationRowsOptions = (thread: Thread) => {
@@ -255,53 +277,68 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     );
   });
 
-  get(routes.conversationOutline, (context, query) => {
+  get(routes.conversationOutline, async (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
-    const selectItems = (items: ThreadConversationOutlineResponse["items"]) =>
-      query.role === undefined
-        ? items
-        : items.filter((item) => item.role === query.role);
-
-    const outlineSequence = getLatestStoredConversationOutlineSequence(
-      deps.db,
-      { threadId: thread.id },
-    );
     const outlineOptions = resolveConversationRowsOptions(thread);
-    const { maxSeq } = outlineOptions;
-    const cacheKey = JSON.stringify([
-      thread.id,
-      getDatabaseDataVersion(deps.db),
-      buildThreadConversationOutlineProjectionKey(
-        thread,
-        outlineSequence,
-        outlineOptions,
-      ),
-    ]);
+    const role = query.role ?? null;
+    const keyFor = (current: Thread, options: typeof outlineOptions) =>
+      JSON.stringify([
+        current.id,
+        getDatabaseDataVersion(deps.db),
+        buildThreadConversationOutlineProjectionKey(
+          current,
+          getConversationOutlineGeneration(deps.db, current.id),
+          options,
+        ),
+        role,
+      ]);
+    const cacheKey = keyFor(thread, outlineOptions);
     const cached = conversationOutlineCache.get(thread.id);
     if (cached !== undefined && cached.key === cacheKey) {
       conversationOutlineCache.delete(thread.id);
       conversationOutlineCache.set(thread.id, cached);
-      return context.json({ items: selectItems(cached.items), maxSeq });
+      return context.body(outlineBody(cached, outlineOptions.maxSeq), 200, {
+        "Content-Type": "application/json",
+      });
     }
-    const response = loadThreadConversationOutline(deps.db, thread, {
-      ...outlineOptions,
-      outlineSequence,
-    });
-    conversationOutlineCache.delete(thread.id);
-    conversationOutlineCache.set(thread.id, {
-      key: cacheKey,
-      items: response.items,
-    });
-    while (
-      conversationOutlineCache.size > CONVERSATION_OUTLINE_CACHE_MAX_ENTRIES
-    ) {
-      const oldest = conversationOutlineCache.keys().next().value;
-      if (oldest === undefined) {
-        break;
+    const pendingKey = `${cacheKey}:${outlineOptions.maxSeq}`;
+    let pending = pendingConversationOutlines.get(pendingKey);
+    if (pending === undefined) {
+      pending = readThreadData(deps.db, {
+        kind: "outline",
+        threadId: thread.id,
+        completedTurnDisplay: outlineOptions.completedTurnDisplay,
+        includeClearedContextHistory:
+          outlineOptions.includeClearedContextHistory,
+        providerDisplayName: outlineOptions.providerDisplayName ?? null,
+        eventRewriteGeneration: getThreadEventRewriteGeneration(thread.id),
+        role,
+      }).finally(() => pendingConversationOutlines.delete(pendingKey));
+      pendingConversationOutlines.set(pendingKey, pending);
+    }
+    const result = await pending;
+    if (result.kind !== "outline")
+      throw new Error("Unexpected outline response");
+    const current = requirePublicThread(deps.db, thread.id);
+    const currentOptions = resolveConversationRowsOptions(current);
+    if (keyFor(current, currentOptions) === cacheKey) {
+      conversationOutlineCache.delete(thread.id);
+      conversationOutlineCache.set(thread.id, {
+        key: cacheKey,
+        bytes: result.bytes,
+        maxSeq: result.maxSeq,
+      });
+      while (
+        conversationOutlineCache.size > CONVERSATION_OUTLINE_CACHE_MAX_ENTRIES
+      ) {
+        const oldest = conversationOutlineCache.keys().next().value;
+        if (oldest === undefined) break;
+        conversationOutlineCache.delete(oldest);
       }
-      conversationOutlineCache.delete(oldest);
     }
-    return context.json({ ...response, items: selectItems(response.items) });
+    return context.body(result.bytes, 200, {
+      "Content-Type": "application/json",
+    });
   });
 
   get(routes.message, (context, query) => {

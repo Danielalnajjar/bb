@@ -451,7 +451,6 @@ describe("timeline context-clear epochs", () => {
     expect(
       loadThreadConversationOutline(db, thread, {
         ...outlineOptions,
-        outlineSequence: 4,
       }).items.map((item) => item.preview),
     ).toEqual(["Earlier task", "Fresh task"]);
     expect(

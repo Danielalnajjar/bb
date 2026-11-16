@@ -1,3 +1,4 @@
+import { invalidateConversationOutlineGeneration } from "./conversation-outline-generation.js";
 import { hasLocalTurnRequestIndex } from "../local-turn-request-index.js";
 import { markThreadPruningWork } from "./thread-pruning-work.js";
 import { isBeforeLatestThreadEvent } from "./event-pruning-guards.js";
@@ -68,7 +69,6 @@ import {
   environments,
   events,
   promptHistoryEntries,
-  threadConversationOutlines,
   threadDynamicContextFileStates,
   threadSearchSegments,
   threads,
@@ -354,9 +354,6 @@ export function deleteThreadEventSuffixInTransaction(
     )
     .run();
   if (result.changes > 0) {
-    db.delete(threadConversationOutlines)
-      .where(eq(threadConversationOutlines.threadId, args.threadId))
-      .run();
     bumpThreadEventRewriteGeneration(args.threadId);
     bumpThreadTimelineOrderingGeneration(args.threadId);
     markThreadPruningWork(db, [args.threadId]);
@@ -521,7 +518,20 @@ function insertStoredEventRow(
       turnId: args.turnId,
       type: args.type,
     };
-    afterCommit(db, () => rememberAppendedEventRow(root, row));
+    afterCommit(db, () => {
+      rememberAppendedEventRow(root, row);
+      if (
+        conversationOutlineLifecycleTypes.some((type) => type === row.type) ||
+        (row.type === "item/completed" &&
+          (row.itemKind === "agentMessage" || row.itemKind === "plan")) ||
+        (conversationOutlineStructuralLifecycleTypes.some(
+          (type) => type === row.type,
+        ) &&
+          (row.itemKind === "backgroundTask" || row.itemKind === "toolCall")) ||
+        row.type === "system/operation"
+      )
+        invalidateConversationOutlineGeneration(root, row.threadId);
+    });
   }
   if (args.type === "client/turn/requested") {
     acquireProjectAttachmentOwnership(
@@ -1364,10 +1374,6 @@ export interface ListStoredTurnKeysArgs {
 
 export interface ListStoredConversationOutlineEventRowsArgs {
   sequenceStart: number;
-  threadId: string;
-}
-
-export interface GetLatestStoredConversationOutlineSequenceArgs {
   threadId: string;
 }
 
@@ -3099,39 +3105,6 @@ function storedConversationOutlineStructuralEventRowFields() {
       ELSE ${events.data}
     END`,
   };
-}
-
-export function getLatestStoredConversationOutlineSequence(
-  db: DbConnection,
-  args: GetLatestStoredConversationOutlineSequenceArgs,
-): number {
-  const lifecycle = db
-    .select({ sequence: max(events.sequence) })
-    .from(events)
-    .where(storedConversationOutlineLifecycleWhere(args.threadId, 0));
-  const completedConversation = db
-    .select({ sequence: max(events.sequence) })
-    .from(events)
-    .where(storedConversationOutlineCompletedWhere(args.threadId, 0));
-  const structural = db
-    .select({ sequence: max(events.sequence) })
-    .from(events)
-    .where(storedConversationOutlineStructuralWhere(args.threadId, 0));
-  const contextClear = db
-    .select({ sequence: max(events.sequence) })
-    .from(events)
-    .where(
-      and(
-        eq(events.threadId, args.threadId),
-        eq(events.type, "system/operation"),
-        sql`json_extract(${events.data}, '$.operation') = ${THREAD_CONTEXT_CLEAR_OPERATION}`,
-        sql`json_extract(${events.data}, '$.status') = 'completed'`,
-      ),
-    );
-
-  return unionAll(lifecycle, completedConversation, structural, contextClear)
-    .all()
-    .reduce((latest, row) => Math.max(latest, row.sequence ?? 0), 0);
 }
 
 export function listStoredConversationOutlineEventRows(

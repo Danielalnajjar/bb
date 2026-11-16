@@ -17,7 +17,6 @@ import {
   listPluginThreadMetadata,
   listThreadAncestors,
   listThreadDescendants,
-  searchThreadsWithPendingInteractionState,
   updateThread,
   type ThreadSearchResultGroup as DbThreadSearchResultGroup,
   type UpdateThreadInput,
@@ -47,6 +46,7 @@ import {
 import type { Hono } from "hono";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
+import { readThreadData } from "../../services/threads/thread-reads.js";
 import {
   parseInteger,
   parsePaginationQuery,
@@ -348,7 +348,7 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
     );
   });
 
-  get(routes.search, (context, query) => {
+  get(routes.search, async (context, query) => {
     const searchQuery = query.query.trim();
     if (countNonWhitespaceChars(searchQuery) < 2) {
       throw new ApiError(
@@ -358,13 +358,17 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
       );
     }
     const limitPerGroup = parseSearchLimitPerGroup(query.limitPerGroup);
+    const result = await readThreadData(deps.db, {
+      kind: "search",
+      query: searchQuery,
+      limitPerGroup,
+    });
+    if (result.kind !== "search") throw new Error("Unexpected search response");
     return context.json(
-      buildThreadSearchResponse(deps, {
-        ...searchThreadsWithPendingInteractionState(deps.db, {
-          query: searchQuery,
-          limitPerGroup,
-        }),
-      }) satisfies ThreadSearchResponse,
+      buildThreadSearchResponse(
+        deps,
+        result.results,
+      ) satisfies ThreadSearchResponse,
     );
   });
 

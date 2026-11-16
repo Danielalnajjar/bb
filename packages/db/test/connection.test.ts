@@ -1,9 +1,15 @@
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { resourceUsage } from "node:process";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { eq } from "drizzle-orm";
 import {
   createConnection,
@@ -44,6 +50,35 @@ function getOnlyInfoLog(logger: CapturingSlowQueryLogger): LoggedInfo {
 }
 
 describe("createConnection", () => {
+  it("opens existing files and serialized fixtures read-only without creating missing files", () => {
+    const directory = mkdtempSync(join(tmpdir(), "readonly-db-"));
+    onTestFinished(() => rmSync(directory, { recursive: true }));
+    const seed = createMigratedConnection();
+    const bytes = seed.$client.serialize();
+    seed.$client.close();
+    const filename = join(directory, "fixture.db");
+    writeFileSync(filename, bytes);
+    for (const source of [filename, bytes]) {
+      const db = createConnection(source, { readonly: true });
+      try {
+        expect(
+          db.$client.prepare("SELECT count(*) AS count FROM threads").get(),
+        ).toEqual({ count: 0 });
+        expect(() =>
+          db.$client.exec("CREATE TABLE forbidden (id TEXT)"),
+        ).toThrow(/readonly/i);
+        expect(() => db.$client.exec("DELETE FROM threads")).toThrow(
+          /readonly/i,
+        );
+      } finally {
+        db.$client.close();
+      }
+    }
+    const missing = join(directory, "missing.db");
+    expect(() => createConnection(missing, { readonly: true })).toThrow();
+    expect(existsSync(missing)).toBe(false);
+  });
+
   it("distinguishes time waiting inside SQLite from CPU work", () => {
     const logger = new CapturingSlowQueryLogger();
     const db = createConnection(":memory:", {
