@@ -1,3 +1,4 @@
+import { closeThreadReader } from "../../src/services/threads/thread-reads.js";
 import { installDefaultEnvironmentProviders } from "./environment-provider.js";
 import { registerTestHarnessWarmup } from "./test-harness-warmup.js";
 import { setPluginEnvironmentProviderBridge } from "../../src/services/plugins/plugin-environment-provider-registry.js";
@@ -403,6 +404,7 @@ export async function createTestAppHarness(
     pluginCatalogService,
     serverMove,
     async cleanup(): Promise<void> {
+      await closeThreadReader(db);
       clearAllThreadProvisionSchedules();
       setPluginEnvironmentProviderBridge(undefined);
       await pluginService.stop();

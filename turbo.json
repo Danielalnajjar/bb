@@ -492,10 +492,36 @@
       "dependsOn": ["^topo", "@bb/plugin-build#generate"]
     },
     "@bb/web#topo": {
-      "dependsOn": ["^topo", "@bb/server#generate:bb-official-marketplace"]
+      "dependsOn": [
+        "^topo",
+        "@bb/server#generate:bb-official-marketplace",
+        "@bb/server#generate:thread-read-worker"
+      ]
     },
     "@bb/server#topo": {
-      "dependsOn": ["^topo", "@bb/server#generate:bb-official-marketplace"]
+      "dependsOn": [
+        "^topo",
+        "@bb/server#generate:bb-official-marketplace",
+        "@bb/server#generate:thread-read-worker"
+      ]
+    },
+    "@bb/server#generate:thread-read-worker": {
+      "dependsOn": ["^topo"],
+      "inputs": [
+        "src/**",
+        "!src/generated/**",
+        "scripts/generate-thread-read-worker.mjs",
+        "$TURBO_ROOT$/packages/db/src/**",
+        "$TURBO_ROOT$/packages/thread-view/src/**",
+        "$TURBO_ROOT$/packages/domain/src/**",
+        "$TURBO_ROOT$/packages/server-contract/src/**",
+        "$TURBO_ROOT$/packages/process-utils/src/**",
+        "$TURBO_ROOT$/packages/config/src/**",
+        "$TURBO_ROOT$/packages/text-utils/src/**",
+        "$TURBO_ROOT$/packages/plugin-build/src/zod-locale-stub.mjs",
+        "$TURBO_ROOT$/pnpm-lock.yaml"
+      ],
+      "outputs": ["src/generated/thread-read-worker.ts"]
     },
     "@bb/server#generate:bb-official-marketplace": {
       "dependsOn": [],

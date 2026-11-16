@@ -1698,7 +1698,8 @@ export function buildThreadTimelineWithProfile(
   );
 }
 
-interface BuildThreadConversationOutlineOptions {
+export interface BuildThreadConversationOutlineOptions {
+  eventRewriteGeneration?: number;
   completedTurnDisplay: CompletedTurnDisplay;
   includeClearedContextHistory: boolean;
   maxSeq: number;
@@ -1991,7 +1992,8 @@ function buildThreadConversationOutlineCheckpointKey(
 ): string {
   return JSON.stringify([
     CONVERSATION_OUTLINE_PROJECTION_VERSION,
-    getThreadEventRewriteGeneration(thread.id),
+    options.eventRewriteGeneration ??
+      getThreadEventRewriteGeneration(thread.id),
     thread.providerId,
     options.providerDisplayName ?? null,
     thread.title,
@@ -2018,11 +2020,14 @@ function shouldMaterializeThreadConversationOutline(thread: Thread): boolean {
   return thread.status === "idle" || thread.status === "error";
 }
 
-export function loadThreadConversationOutline(
+export function readThreadConversationOutline(
   db: DbConnection,
   thread: Thread,
   options: LoadThreadConversationOutlineOptions,
-): ThreadConversationOutlineResponse {
+): {
+  response: ThreadConversationOutlineResponse;
+  record: Parameters<typeof upsertThreadConversationOutlineRecord>[1] | null;
+} {
   const projectionKey = buildThreadConversationOutlineProjectionKey(
     thread,
     options.outlineSequence,
@@ -2032,7 +2037,7 @@ export function loadThreadConversationOutline(
   if (stored?.projectionKey === projectionKey) {
     const items = parseThreadConversationOutlineItems(stored.itemsJson);
     if (items !== null) {
-      return { items, maxSeq: options.maxSeq };
+      return { response: { items, maxSeq: options.maxSeq }, record: null };
     }
   }
 
@@ -2092,14 +2097,33 @@ export function loadThreadConversationOutline(
       };
     },
   );
-  if (shouldMaterializeThreadConversationOutline(thread)) {
-    upsertThreadConversationOutlineRecord(db, {
-      itemsJson: JSON.stringify(response.items),
-      projectionKey,
-      threadId: thread.id,
-    });
-  }
-  return response;
+  return {
+    response,
+    record: shouldMaterializeThreadConversationOutline(thread)
+      ? {
+          itemsJson: JSON.stringify(response.items),
+          projectionKey,
+          threadId: thread.id,
+        }
+      : null,
+  };
+}
+
+export function materializeThreadConversationOutline(
+  db: DbConnection,
+  record: Parameters<typeof upsertThreadConversationOutlineRecord>[1] | null,
+): void {
+  if (record !== null) upsertThreadConversationOutlineRecord(db, record);
+}
+
+export function loadThreadConversationOutline(
+  db: DbConnection,
+  thread: Thread,
+  options: LoadThreadConversationOutlineOptions,
+): ThreadConversationOutlineResponse {
+  const selection = readThreadConversationOutline(db, thread, options);
+  materializeThreadConversationOutline(db, selection.record);
+  return selection.response;
 }
 
 function collectTimelineItemRows(

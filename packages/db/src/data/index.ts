@@ -119,6 +119,7 @@ export type {
   ReorderPinnedThreadResult,
   RunningThreadRow,
   ThreadSearchResultGroup,
+  ThreadSearchResults,
   ThreadWithPendingInteractionState,
   ThreadExecutionOverride,
   UpdateThreadInput,
