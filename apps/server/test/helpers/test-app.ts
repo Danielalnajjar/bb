@@ -420,6 +420,7 @@ export async function createTestAppHarness(
       clearAllThreadProvisionSchedules();
       setPluginEnvironmentProviderBridge(undefined);
       await pluginService.stop();
+      if (fileBackedDb) db.$client.close();
       await rm(dataDir, {
         recursive: true,
         force: true,
