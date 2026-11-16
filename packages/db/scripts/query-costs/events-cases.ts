@@ -37,7 +37,6 @@ import {
   getLastStoredTurnRequestEvent,
   getLatestCompletedThreadContextClearSequence,
   getLatestModelFallbackRowSinceTurnRequest,
-  getLatestStoredConversationOutlineSequence,
   getLatestStoredRateLimitsEvent,
   getLatestStoredThreadEventOfTypes,
   getLatestThreadStopAim,
@@ -1041,13 +1040,6 @@ export const EVENTS_COST_CASES: readonly QueryCostCase[] = [
     run: (db, fixture) =>
       findLastRootStoredTurnStarted(db, {
         atOrBeforeSequence: turnAt(fixture, 0).completedSequence,
-        threadId: fixture.threadId,
-      }),
-  },
-  {
-    name: `${EVENTS}#getLatestStoredConversationOutlineSequence`,
-    run: (db, fixture) =>
-      getLatestStoredConversationOutlineSequence(db, {
         threadId: fixture.threadId,
       }),
   },

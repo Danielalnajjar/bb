@@ -1,3 +1,4 @@
+import { closeThreadReader } from "./services/threads/thread-reads.js";
 import { createDesktopAppUpdateService } from "./services/system/desktop-app-update.js";
 import {
   AUTO_UPDATE_CHECK_MS,
@@ -585,6 +586,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
       });
       await tunnelIngress.closeAll();
       await closeWebSockets();
+      await closeThreadReader(db);
       await closeServer;
       await walCheckpointer.stop();
     })();

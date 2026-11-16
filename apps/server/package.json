@@ -8,6 +8,7 @@
     "start": "node dist/index.js",
     "dev": "node --conditions=source --import tsx scripts/dev-supervisor.mjs",
     "clean": "rimraf dist",
+    "generate:thread-read-worker": "node scripts/generate-thread-read-worker.mjs",
     "generate:bb-official-marketplace": "node --conditions=source --import tsx scripts/generate-bb-official-marketplace.ts",
     "typecheck": "tsrs --noEmit",
     "lint:type-aware": "oxlint -c ../../.oxlintrc.type-aware.json",

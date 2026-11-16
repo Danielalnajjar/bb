@@ -1,3 +1,4 @@
+import { closeThreadReader } from "../../../apps/server/src/services/threads/thread-reads.js";
 import { sweepProviderLifecycles } from "../../../apps/server/src/services/environments/environment-engine.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
@@ -426,6 +427,7 @@ async function startIntegrationServer(
       });
       await closeWebSockets();
       await closed;
+      await closeThreadReader(db);
       await walCheckpointer.stop();
     },
   };

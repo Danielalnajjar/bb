@@ -1,3 +1,4 @@
+import { closeThreadReader } from "../../src/services/threads/thread-reads.js";
 import { Hono } from "hono";
 import { expect, vi } from "vitest";
 import { z } from "zod";
@@ -14,7 +15,6 @@ import {
   getAppSettings,
   setAppSettings,
   setExperiments,
-  threadConversationOutlines,
   threads,
   type DbConnection,
 } from "@bb/db";
@@ -259,9 +259,9 @@ async function withUncachedServer<T>(
 ): Promise<T> {
   const db = cloneDb(source);
   try {
-    db.delete(threadConversationOutlines).run();
     return await run(serverOver(harness, db));
   } finally {
+    await closeThreadReader(db);
     db.$client.close();
   }
 }
@@ -784,7 +784,10 @@ export async function expectCachedReadsMatchUncachedBuilds(
             .toEqual(uncachedWindow.body);
         }
       } finally {
-        for (const db of restartedDbs) db.$client.close();
+        for (const db of restartedDbs) {
+          await closeThreadReader(db);
+          db.$client.close();
+        }
       }
     });
   } finally {

@@ -3,6 +3,7 @@ import {
   ensurePersonalProject,
   initializeLocalTurnRequestIndex,
   migrate,
+  threadConversationOutlines,
 } from "@bb/db";
 import type {
   DbConnection,
@@ -59,6 +60,7 @@ export function initDb(
       );
     }
     migrate(db, { logger: options.logger });
+    db.delete(threadConversationOutlines).run();
     ensurePersonalProject(db);
     initializeLocalTurnRequestIndex(db, options.logger);
   } catch (error) {
