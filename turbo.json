@@ -415,6 +415,7 @@
       // clean worktree must build that runtime before the server starts.
       "dependsOn": [
         "@bb/server#generate:bb-official-marketplace",
+        "@bb/server#generate:thread-read-worker",
         "@bb/templates#generate:templates",
         "@bb/plugin-build#generate",
         "@get-bb/plugin-sdk#build:runtime"
@@ -492,11 +493,7 @@
       "dependsOn": ["^topo", "@bb/plugin-build#generate"]
     },
     "@bb/web#topo": {
-      "dependsOn": [
-        "^topo",
-        "@bb/server#generate:bb-official-marketplace",
-        "@bb/server#generate:thread-read-worker"
-      ]
+      "dependsOn": ["^topo", "@bb/server#generate:bb-official-marketplace"]
     },
     "@bb/server#topo": {
       "dependsOn": [

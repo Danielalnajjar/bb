@@ -10,6 +10,7 @@ import type {
 } from "./thread-read-contract.js";
 
 const readers = new WeakMap<DbConnection, ThreadReader>();
+const closed = new WeakSet<DbConnection>();
 
 class ThreadReader {
   private readonly worker: Worker;
@@ -109,6 +110,7 @@ export function readThreadData(
   db: DbConnection,
   task: ThreadReadTask,
 ): Promise<ThreadReadResult> {
+  if (closed.has(db)) return Promise.reject(new Error("Thread reader closed"));
   let reader = readers.get(db);
   if (reader === undefined) {
     reader = new ThreadReader(db);
@@ -118,5 +120,6 @@ export function readThreadData(
 }
 
 export async function closeThreadReader(db: DbConnection): Promise<void> {
+  closed.add(db);
   await readers.get(db)?.close();
 }

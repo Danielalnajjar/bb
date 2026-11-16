@@ -8,7 +8,6 @@ import {
   createProject,
   createThread,
   deleteThreadEventSuffixInTransaction,
-  getLatestStoredConversationOutlineSequence,
   getThreadEventRewriteGeneration,
   insertEvents,
   noopNotifier,
@@ -16,7 +15,7 @@ import {
   upsertHost,
 } from "@bb/db";
 import { createMigratedConnection } from "@bb/db/testing";
-import { readThreadConversationOutline } from "../../../src/services/threads/timeline.js";
+import { loadThreadConversationOutline } from "../../../src/services/threads/timeline.js";
 import {
   closeThreadReader,
   readThreadData,
@@ -81,16 +80,13 @@ describe("thread read isolation", () => {
     const first = await outline();
     expect(first.kind).toBe("outline");
     if (first.kind !== "outline") throw new Error("Expected outline");
-    const expected = readThreadConversationOutline(db, thread, {
+    const expected = loadThreadConversationOutline(db, thread, {
       completedTurnDisplay: "collapse",
       includeClearedContextHistory: true,
       maxSeq: 1,
-      outlineSequence: getLatestStoredConversationOutlineSequence(db, {
-        threadId: thread.id,
-      }),
     });
     expect(new TextDecoder().decode(first.bytes)).toBe(
-      JSON.stringify(expected.response),
+      JSON.stringify(expected),
     );
     append(2, "alpha second");
     const second = await outline();
@@ -168,5 +164,8 @@ describe("thread read isolation", () => {
     const rejected = expect(pending).rejects.toThrow("Thread reader closed");
     await closeThreadReader(db);
     await rejected;
+    await expect(
+      readThreadData(db, { kind: "search", query: "alpha", limitPerGroup: 20 }),
+    ).rejects.toThrow("Thread reader closed");
   });
 });

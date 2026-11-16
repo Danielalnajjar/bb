@@ -2,6 +2,7 @@ import { extractThreadContextWindowUsage } from "@bb/thread-view";
 import {
   getAppSettings,
   getDatabaseDataVersion,
+  getConversationOutlineGeneration,
   getThreadPluginMetadata,
   patchThreadPluginMetadata,
   getLatestCompletedThreadContextClearSequence,
@@ -145,6 +146,24 @@ function parseThreadTimelinePage(
   };
 }
 
+function outlineBody(
+  cached: { bytes: Uint8Array<ArrayBuffer>; maxSeq: number },
+  maxSeq: number,
+): ReadableStream<Uint8Array<ArrayBuffer>> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(
+        cached.bytes.subarray(
+          0,
+          cached.bytes.length - String(cached.maxSeq).length - 1,
+        ),
+      );
+      controller.enqueue(new TextEncoder().encode(`${maxSeq}}`));
+      controller.close();
+    },
+  });
+}
+
 export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
   const { get, patch } = typedRoutes<PublicApiSchema>(app, {
     onValidationError: (msg) => new ApiError(400, "invalid_request", msg),
@@ -153,7 +172,11 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
   const timelineWindows = createThreadTimelineWindows(deps);
   const conversationOutlineCache = new Map<
     string,
-    { key: string; bytes: Uint8Array<ArrayBuffer> }
+    { key: string; bytes: Uint8Array<ArrayBuffer>; maxSeq: number }
+  >();
+  const pendingConversationOutlines = new Map<
+    string,
+    ReturnType<typeof readThreadData>
   >();
   const CONVERSATION_OUTLINE_CACHE_MAX_ENTRIES = 128;
   const resolveConversationRowsOptions = (thread: Thread) => {
@@ -264,7 +287,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
         getDatabaseDataVersion(deps.db),
         buildThreadConversationOutlineProjectionKey(
           current,
-          options.maxSeq,
+          getConversationOutlineGeneration(deps.db, current.id),
           options,
         ),
         role,
@@ -274,31 +297,36 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     if (cached !== undefined && cached.key === cacheKey) {
       conversationOutlineCache.delete(thread.id);
       conversationOutlineCache.set(thread.id, cached);
-      return context.body(cached.bytes, 200, {
+      return context.body(outlineBody(cached, outlineOptions.maxSeq), 200, {
         "Content-Type": "application/json",
       });
     }
-    const result = await readThreadData(deps.db, {
-      kind: "outline",
-      threadId: thread.id,
-      completedTurnDisplay: outlineOptions.completedTurnDisplay,
-      includeClearedContextHistory: outlineOptions.includeClearedContextHistory,
-      providerDisplayName: outlineOptions.providerDisplayName ?? null,
-      eventRewriteGeneration: getThreadEventRewriteGeneration(thread.id),
-      role,
-    });
+    const pendingKey = `${cacheKey}:${outlineOptions.maxSeq}`;
+    let pending = pendingConversationOutlines.get(pendingKey);
+    if (pending === undefined) {
+      pending = readThreadData(deps.db, {
+        kind: "outline",
+        threadId: thread.id,
+        completedTurnDisplay: outlineOptions.completedTurnDisplay,
+        includeClearedContextHistory:
+          outlineOptions.includeClearedContextHistory,
+        providerDisplayName: outlineOptions.providerDisplayName ?? null,
+        eventRewriteGeneration: getThreadEventRewriteGeneration(thread.id),
+        role,
+      }).finally(() => pendingConversationOutlines.delete(pendingKey));
+      pendingConversationOutlines.set(pendingKey, pending);
+    }
+    const result = await pending;
     if (result.kind !== "outline")
       throw new Error("Unexpected outline response");
     const current = requirePublicThread(deps.db, thread.id);
     const currentOptions = resolveConversationRowsOptions(current);
-    if (
-      result.maxSeq === outlineOptions.maxSeq &&
-      keyFor(current, currentOptions) === cacheKey
-    ) {
+    if (keyFor(current, currentOptions) === cacheKey) {
       conversationOutlineCache.delete(thread.id);
       conversationOutlineCache.set(thread.id, {
         key: cacheKey,
         bytes: result.bytes,
+        maxSeq: result.maxSeq,
       });
       while (
         conversationOutlineCache.size > CONVERSATION_OUTLINE_CACHE_MAX_ENTRIES

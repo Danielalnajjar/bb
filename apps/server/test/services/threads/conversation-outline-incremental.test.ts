@@ -7,7 +7,6 @@ import {
   deleteThreadEventSuffixInTransaction,
   createThread,
   noopNotifier,
-  getLatestStoredConversationOutlineSequence,
   getLatestThreadSequence,
 } from "@bb/db";
 import {
@@ -206,9 +205,6 @@ function load(
     completedTurnDisplay,
     includeClearedContextHistory: false,
     maxSeq: getLatestThreadSequence(testThread.db, { threadId }),
-    outlineSequence: getLatestStoredConversationOutlineSequence(testThread.db, {
-      threadId,
-    }),
   });
 }
 

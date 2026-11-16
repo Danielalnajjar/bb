@@ -2,16 +2,13 @@ import { ApiError } from "../../errors.js";
 import { parentPort } from "node:worker_threads";
 import {
   createConnection,
-  getLatestStoredConversationOutlineSequence,
   getLatestThreadSequence,
   searchThreadsWithPendingInteractionState,
   type DbConnection,
 } from "@bb/db";
 import { requirePublicThread } from "../lib/entity-lookup.js";
-import {
-  materializeThreadConversationOutline,
-  readThreadConversationOutline,
-} from "./timeline.js";
+import { loadThreadConversationOutline } from "./timeline.js";
+import { takeEventLoopWorkWindowSnapshot } from "../system/event-loop-work.js";
 import type {
   ThreadReadRequest,
   ThreadReadResponse,
@@ -30,11 +27,14 @@ port.on("message", (request: ThreadReadRequest) => {
     if (typeof source === "string") {
       if (connection?.source !== source) {
         connection?.db.$client.close();
-        connection = { source, db: createConnection(source) };
+        connection = {
+          source,
+          db: createConnection(source, { readonly: true }),
+        };
       }
       db = connection.db;
     } else {
-      transient = createConnection(Buffer.from(source));
+      transient = createConnection(Buffer.from(source), { readonly: true });
       db = transient;
     }
     const task = request.task;
@@ -57,23 +57,17 @@ port.on("message", (request: ThreadReadRequest) => {
             ? {}
             : { providerDisplayName: task.providerDisplayName }),
           maxSeq: getLatestThreadSequence(db, { threadId: thread.id }),
-          outlineSequence: getLatestStoredConversationOutlineSequence(db, {
-            threadId: thread.id,
-          }),
         };
         return {
-          selection: readThreadConversationOutline(db, thread, options),
+          response: loadThreadConversationOutline(db, thread, options),
         };
       })();
-      materializeThreadConversationOutline(db, snapshot.selection.record);
       const response = {
         items:
           task.role === null
-            ? snapshot.selection.response.items
-            : snapshot.selection.response.items.filter(
-                (item) => item.role === task.role,
-              ),
-        maxSeq: snapshot.selection.response.maxSeq,
+            ? snapshot.response.items
+            : snapshot.response.items.filter((item) => item.role === task.role),
+        maxSeq: snapshot.response.maxSeq,
       };
       result = {
         kind: "outline",
@@ -95,6 +89,7 @@ port.on("message", (request: ThreadReadRequest) => {
         : {}),
     } satisfies ThreadReadResponse);
   } finally {
+    takeEventLoopWorkWindowSnapshot();
     transient?.$client.close();
   }
 });

@@ -3,12 +3,13 @@ import { installDefaultEnvironmentProviders } from "./environment-provider.js";
 import { registerTestHarnessWarmup } from "./test-harness-warmup.js";
 import { setPluginEnvironmentProviderBridge } from "../../src/services/plugins/plugin-environment-provider-registry.js";
 import { clearAllThreadProvisionSchedules } from "../../src/services/threads/thread-startup-store.js";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { serve } from "@hono/node-server";
 import type { AddressInfo } from "node:net";
 import {
+  createConnection,
   ensurePersonalProject,
   getAppSettings,
   getDisabledProviderIds,
@@ -100,6 +101,7 @@ export async function installTestBuiltinPlugin(
 }
 
 export type TestAppHarnessConfigOverrides = Partial<ServerRuntimeConfig> & {
+  fileBackedDb?: boolean;
   appUpdateService?: AppUpdateService;
   cliCommandService?: CliCommandService;
   terminalAttachTimeoutMs?: number;
@@ -166,6 +168,7 @@ export async function createTestAppHarness(
   overrides: TestAppHarnessConfigOverrides = {},
 ): Promise<TestAppHarness> {
   const {
+    fileBackedDb = false,
     appUpdateService,
     cliCommandService,
     terminalAttachTimeoutMs = TEST_TERMINAL_RPC_TIMEOUT_MS,
@@ -179,7 +182,16 @@ export async function createTestAppHarness(
   } = overrides;
   const logger = createTestLogger();
   const dataDir = await mkdtemp(join(tmpdir(), "bb-server-test-"));
-  const db = createTestDb();
+  let db = createTestDb();
+  if (fileBackedDb) {
+    const filename = join(dataDir, "test.db");
+    try {
+      await writeFile(filename, db.$client.serialize());
+    } finally {
+      db.$client.close();
+    }
+    db = createConnection(filename);
+  }
   setAppSettings(db, {
     ...getAppSettings(db),
     machineGitCredentialsEnabled: false,
