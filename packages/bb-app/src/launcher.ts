@@ -69,7 +69,10 @@ import {
   type ClientConfig,
 } from "@bb/config/client-config";
 import { validateLogLevel } from "@bb/config/log-level";
-import { validateOptionalUrl } from "@bb/config/public-url";
+import {
+  validateConnectOrigin,
+  validateOptionalUrl,
+} from "@bb/config/public-url";
 import { parseServerBindHost, type ServerBindHost } from "@bb/config/server";
 import { toOptionalString } from "@bb/config/strings";
 import {
@@ -174,12 +177,22 @@ const CONFIG_LIST_COMMAND = "list";
 const CONFIG_REFRESH_COMMAND = "refresh";
 
 type ManagedConfigValueKey = BbAppManagedConfigKey;
-type ManagedConfigKey = "BB_SERVER_URL" | "serverUrl" | ManagedConfigValueKey;
+type ManagedConfigKey =
+  | "BB_SERVER_URL"
+  | "serverUrl"
+  | "BB_CONNECT_ORIGIN"
+  | "connectOrigin"
+  | ManagedConfigValueKey;
 
 const MANAGED_CONFIG_KEYS = BB_APP_MANAGED_CONFIG_KEYS;
 const MANAGED_CONFIG_KEY_VALUES = new Set<string>(MANAGED_CONFIG_KEYS);
-const STARTUP_ONLY_MANAGED_CONFIG_KEYS = new Set<string>(["BB_LOG_LEVEL"]);
+const STARTUP_ONLY_MANAGED_CONFIG_KEYS = new Set<string>([
+  "BB_LOG_LEVEL",
+  "BB_CONNECT_ORIGIN",
+  "connectOrigin",
+]);
 const STARTUP_ONLY_MANAGED_ENV_KEYS = new Set<string>([
+  "BB_CONNECT_ORIGIN",
   "NODE_USE_ENV_PROXY",
   "NODE_USE_SYSTEM_CA",
   "NODE_EXTRA_CA_CERTS",
@@ -381,6 +394,7 @@ interface LauncherCliOptions {
   serverBindHost?: string;
   serverPort?: string;
   serverUrl?: string;
+  connectOrigin?: string;
   supervise?: boolean;
 }
 
@@ -811,7 +825,9 @@ function isManagedConfigValueKey(
 }
 
 function supportedConfigKeysText(): string {
-  return ["BB_SERVER_URL", ...MANAGED_CONFIG_KEYS].join(", ");
+  return ["BB_SERVER_URL", "BB_CONNECT_ORIGIN", ...MANAGED_CONFIG_KEYS].join(
+    ", ",
+  );
 }
 
 function createDefaultLauncherOptions(): LauncherCliOptions {
@@ -861,6 +877,7 @@ export function parseLauncherArgs(args: string[]): ParsedLauncherArgs {
       "server-bind-host": { type: "string" },
       "server-port": { type: "string" },
       "server-url": { type: "string" },
+      "connect-origin": { type: "string" },
       help: { short: "h", type: "boolean" },
       json: { type: "boolean" },
       server: { type: "string" },
@@ -925,6 +942,10 @@ export function parseLauncherArgs(args: string[]): ParsedLauncherArgs {
   }
   if (serverUrl !== undefined) {
     options.serverUrl = serverUrl;
+  }
+  const connectOrigin = readStringOption(parsed.values["connect-origin"]);
+  if (connectOrigin !== undefined) {
+    options.connectOrigin = validateConnectOrigin(connectOrigin);
   }
 
   return {
@@ -1032,6 +1053,9 @@ function createEnvFromOptions(
   }
   if (args.options.serverUrl !== undefined) {
     env.BB_SERVER_URL = args.options.serverUrl;
+  }
+  if (args.options.connectOrigin !== undefined) {
+    env.BB_CONNECT_ORIGIN = args.options.connectOrigin;
   }
   if (args.options.hostId !== undefined) {
     env.BB_HOST_ID = args.options.hostId;
@@ -1206,6 +1230,9 @@ function mergeManagedConfig(
   if (patchConfig.serverUrl !== undefined) {
     nextConfig.serverUrl = patchConfig.serverUrl;
   }
+  if (patchConfig.connectOrigin !== undefined) {
+    nextConfig.connectOrigin = patchConfig.connectOrigin;
+  }
   if (patchConfig.serverHeaders !== undefined) {
     nextConfig.serverHeaders = patchConfig.serverHeaders;
   }
@@ -1309,6 +1336,9 @@ async function mutateClientConfig(
 function validateManagedConfigForWrite(config: ManagedConfigForWrite): void {
   if (config.serverUrl !== undefined) {
     validateOptionalUrl("BB_SERVER_URL", config.serverUrl);
+  }
+  if (config.connectOrigin !== undefined) {
+    validateConnectOrigin(config.connectOrigin);
   }
   const configValues = config.config;
   if (configValues === undefined) {
@@ -1420,6 +1450,13 @@ export async function resolveBbAppRuntimeState(
       ? env
       : applyWorktreeRuntimePolicy(env, args.worktreePolicy);
   const managedEnv = applyRuntimePolicy(persistedEnv);
+  const connectOrigin =
+    args.options.connectOrigin ??
+    config.connectOrigin ??
+    managedEnv.BB_CONNECT_ORIGIN;
+  if (connectOrigin !== undefined) {
+    managedEnv.BB_CONNECT_ORIGIN = connectOrigin;
+  }
 
   if (args.serverUrlMode === "local") {
     const localEnv = { ...managedEnv };
@@ -1565,6 +1602,7 @@ Supported keys:
 Startup-only:
   BB_LOG_LEVEL changes require a full bb-app restart with
   bb-app stop && bb-app start, or a desktop app restart.
+  BB_CONNECT_ORIGIN applies at the next host-daemon start; no server restart.
 
 Config file:
   ${formatBbAppConfigPath(dataDir)}
@@ -1590,6 +1628,7 @@ Startup-only server and launcher keys:
   Changes require a full bb-app restart with bb-app stop && bb-app start,
   or a desktop app restart. BB_APP_URL can instead be changed live with
   bb-app config.
+  BB_CONNECT_ORIGIN applies at the next host-daemon start; no server restart.
 
 Env file:
   ${formatBbAppEnvPath(dataDir)}
@@ -1612,6 +1651,9 @@ Config file:
 function resolveManagedConfigKey(rawKey: string): ManagedConfigKey {
   const key = rawKey.trim();
   if (key === "BB_SERVER_URL" || key === "serverUrl") {
+    return key;
+  }
+  if (key === "BB_CONNECT_ORIGIN" || key === "connectOrigin") {
     return key;
   }
   if (isManagedConfigValueKey(key)) {
@@ -1637,6 +1679,9 @@ function createManagedConfigPatch(
   if (key === "BB_SERVER_URL" || key === "serverUrl") {
     return { serverUrl: value };
   }
+  if (key === "BB_CONNECT_ORIGIN" || key === "connectOrigin") {
+    return { connectOrigin: validateConnectOrigin(value) };
+  }
   return { config: createManagedConfigValuePatch(key, value) };
 }
 
@@ -1649,6 +1694,10 @@ function unsetManagedConfigKey(
   };
   if (key === "BB_SERVER_URL" || key === "serverUrl") {
     delete nextConfig.serverUrl;
+    return pruneManagedConfig(nextConfig);
+  }
+  if (key === "BB_CONNECT_ORIGIN" || key === "connectOrigin") {
+    delete nextConfig.connectOrigin;
     return pruneManagedConfig(nextConfig);
   }
   const nextConfigValues: ManagedConfigValues = {
@@ -1696,6 +1745,9 @@ function formatManagedConfig(config: ManagedConfig): string {
   const lines: string[] = [];
   if (config.serverUrl !== undefined) {
     lines.push(`BB_SERVER_URL=${config.serverUrl}`);
+  }
+  if (config.connectOrigin !== undefined) {
+    lines.push(`BB_CONNECT_ORIGIN=${config.connectOrigin}`);
   }
   for (const key of MANAGED_CONFIG_KEYS) {
     const value = config.config?.[key];
@@ -1890,6 +1942,9 @@ async function readConfiguredStartupOnlyManagedKeys(
     readManagedEnvFile({ dataDir }),
   ]);
   const configuredKeys = new Set<string>();
+  if (config.connectOrigin !== undefined) {
+    configuredKeys.add("BB_CONNECT_ORIGIN");
+  }
   for (const key of Object.keys(config.config ?? {})) {
     if (isStartupOnlyManagedKey("config", key)) {
       configuredKeys.add(key);
@@ -1908,6 +1963,15 @@ async function refreshRunningServerConfigAfterWrite(
   source: "config" | "env",
   key: string,
 ): Promise<void> {
+  if (
+    key === "BB_CONNECT_ORIGIN" ||
+    (source === "config" && key === "connectOrigin")
+  ) {
+    process.stdout.write(
+      `${key} is startup-only for the host daemon; it applies at the next daemon start. No server reload or restart is needed.\n`,
+    );
+    return;
+  }
   const refreshed = await refreshRunningServerConfig({
     required: false,
     serverUrl,
@@ -2030,7 +2094,10 @@ async function runEnvCommand(args: RunEnvCommandArgs): Promise<void> {
   if (key === "BB_SERVER_BIND_HOST") {
     parseServerBindHost(value);
   }
-  const patch = createManagedEnvPatch(key, value);
+  const patch = createManagedEnvPatch(
+    key,
+    key === "BB_CONNECT_ORIGIN" ? validateConnectOrigin(value) : value,
+  );
   await mutateManagedEnv(args.dataDir, (current) =>
     mergeManagedEnvFile(current, patch),
   );
@@ -2590,6 +2657,7 @@ export function createServerEnv(args: CreateServerEnvArgs): NodeJS.ProcessEnv {
 }
 
 export function createDaemonEnv(args: CreateDaemonEnvArgs): NodeJS.ProcessEnv {
+  const connectOrigin = args.env.BB_CONNECT_ORIGIN;
   return {
     ...hostToolchain.environment(stripThreadContextEnv(args.env)),
     BB_APP_VERSION: args.context.appVersion,
@@ -2598,6 +2666,9 @@ export function createDaemonEnv(args: CreateDaemonEnvArgs): NodeJS.ProcessEnv {
     BB_DATA_DIR: args.context.dataDir,
     BB_HOST_DAEMON_PORT: String(args.context.daemonPort),
     BB_SERVER_URL: args.serverUrl,
+    ...(connectOrigin === undefined
+      ? {}
+      : { BB_CONNECT_ORIGIN: validateConnectOrigin(connectOrigin) }),
     NODE_ENV: "production",
   };
 }
@@ -3072,7 +3143,7 @@ export async function runBbHostDaemon(
     process.stdout.write(`bb-host-daemon
 
 Usage:
-  bb-host-daemon [--server-url <url>] [--host-daemon-port <port>] [--host-id <id>] [--enroll-key <key>] [--auto-update] [--supervise]
+  bb-host-daemon [--server-url <url>] [--connect-origin <origin>] [--host-daemon-port <port>] [--host-id <id>] [--enroll-key <key>] [--auto-update] [--supervise]
   bb-host-daemon join --server-url <url> [--host-daemon-port <port>] [--join-code <code> --host-id <id>] [--auto-update]
 `);
     return;
@@ -3126,7 +3197,7 @@ Usage:
   bb-app config refresh
   bb-app env set <key> <value>
   bb-app client ssh-target set <server-origin> <ssh-target> [--host-id <id>]
-  bb-app host-daemon [--server-url <url>] [--host-daemon-port <port>] [--host-id <id>] [--enroll-key <key>] [--auto-update] [--supervise]
+  bb-app host-daemon [--server-url <url>] [--connect-origin <origin>] [--host-daemon-port <port>] [--host-id <id>] [--enroll-key <key>] [--auto-update] [--supervise]
   bb-app host-daemon join --server-url <url> [--host-daemon-port <port>] [--join-code <code> --host-id <id>] [--auto-update]
 
   --supervise restarts the host daemon when it crashes or installs an

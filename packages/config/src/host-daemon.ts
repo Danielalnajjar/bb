@@ -11,6 +11,7 @@ import {
 } from "./common.js";
 import {
   BB_APP_URL_ENV,
+  BB_CONNECT_ORIGIN_ENV,
   BB_DEV_APP_PORT_ENV,
   DEFAULT_BB_APP_URL,
 } from "./env-vars.js";
@@ -25,6 +26,7 @@ interface HostDaemonConnectionConfig {
   BB_DEV_APP_PORT?: number;
   BB_HOST_DAEMON_PORT: number;
   BB_SERVER_URL: string;
+  BB_CONNECT_ORIGIN?: string;
 }
 
 interface HostDaemonConfig extends CommonConfig, HostDaemonConnectionConfig {}
@@ -87,6 +89,15 @@ export function loadHostDaemonConnectionConfig(
       mode: loader.mode,
     }),
   };
+  assignIfDefined({
+    key: "BB_CONNECT_ORIGIN",
+    target: config,
+    value: readOptionalEnvVar({
+      context: loader.context,
+      definition: BB_CONNECT_ORIGIN_ENV,
+      env: loader.env,
+    }),
+  });
   const devAppPort = readOptionalEnvVar({
     context: loader.context,
     definition: BB_DEV_APP_PORT_ENV,
