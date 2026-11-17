@@ -149,6 +149,97 @@ describe("ConnectTunnelClient", () => {
     ).toThrow("HTTP for a local *.localhost");
   });
 
+  it("uses the trusted cloud origin for label assignment and share and tunnel domains on direct transport", async () => {
+    const requests: LabelRequest[] = [];
+    const client = new ConnectTunnelClient({
+      serverUrl: "https://bb-vm.tail.test:444",
+      connectOrigin: "https://owner.getbb.app",
+      hostName: "Sawyer Air",
+      machineCredential: "test-machine-credential",
+      fetchFn: labelFetch(requests),
+      logger,
+    });
+    try {
+      const identity = await client.ensureTunnelIdentity();
+      expect.soft(requests).toEqual([
+        {
+          body: { desiredName: "Sawyer Air" },
+          credential: "test-machine-credential",
+          url: "https://owner.getbb.app/api/connect/machine-label",
+        },
+      ]);
+      expect
+        .soft(buildMachineSharePublicOrigin(identity, 4173))
+        .toBe("https://sawyer-air--4173.getbb.app");
+      expect
+        .soft(buildMachineTunnelUrl(identity))
+        .toBe("wss://sawyer-air.getbb.app/__tunnel?v=1");
+    } finally {
+      client.shutdown();
+    }
+  });
+
+  it.each([
+    [
+      "http://owner.bb.localhost:42745",
+      "http://sawyer-air--4173.bb.localhost:42745",
+    ],
+    ["https://owner.next.getbb.app", "https://sawyer-air--4173.next.getbb.app"],
+  ])(
+    "keeps local and Connect Next origin semantics with %s",
+    async (connectOrigin, shareOrigin) => {
+      const requests: LabelRequest[] = [];
+      const client = new ConnectTunnelClient({
+        serverUrl: "https://bb-vm.tail.test:444",
+        connectOrigin,
+        hostName: "Sawyer Air",
+        machineCredential: "test-machine-credential",
+        fetchFn: labelFetch(requests),
+        logger,
+      });
+      try {
+        const identity = await client.ensureTunnelIdentity();
+        expect(requests[0]?.url).toBe(
+          `${connectOrigin}/api/connect/machine-label`,
+        );
+        expect(buildMachineSharePublicOrigin(identity, 4173)).toBe(shareOrigin);
+      } finally {
+        client.shutdown();
+      }
+    },
+  );
+
+  it("does not forward its credential to a label endpoint redirect", async () => {
+    const unexpectedRequests: string[] = [];
+    const destination = createServer((request, response) => {
+      unexpectedRequests.push(request.url ?? "");
+      response.end("unexpected destination");
+    });
+    const destinationPort = await listen(destination);
+    const origin = createServer((_request, response) => {
+      response.writeHead(307, {
+        location: `http://127.0.0.1:${destinationPort}/untrusted`,
+      });
+      response.end();
+    });
+    const originPort = await listen(origin);
+    const client = new ConnectTunnelClient({
+      serverUrl: "https://bb-vm.tail.test:444",
+      connectOrigin: `http://owner.bb.localhost:${originPort}`,
+      hostName: "Sawyer Air",
+      machineCredential: "test-machine-credential",
+      fetchFn: (_input, init) =>
+        fetch(`http://127.0.0.1:${originPort}/api/connect/machine-label`, init),
+      logger,
+    });
+    try {
+      await expect(client.ensureTunnelIdentity()).rejects.toThrow();
+      expect(unexpectedRequests).toEqual([]);
+    } finally {
+      client.shutdown();
+    }
+  });
+
   it("assigns its own label at the enrolled gate, dials on first share, and closes on the last", async () => {
     const gateServer = createServer();
     const gatePort = await listen(gateServer);

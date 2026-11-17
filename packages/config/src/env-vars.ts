@@ -26,7 +26,11 @@ import {
   type AppSurface,
 } from "./app-surface.js";
 import { validateLogLevel } from "./log-level.js";
-import { validateOptionalUrl, validateRequiredUrl } from "./public-url.js";
+import {
+  validateConnectOrigin,
+  validateOptionalUrl,
+  validateRequiredUrl,
+} from "./public-url.js";
 import { BB_LOOPBACK_HOST, parsePortValue } from "./runtime.js";
 import { toOptionalString } from "./strings.js";
 
@@ -196,6 +200,13 @@ export const BB_SERVER_URL_ENV = defineEnvVar<string>({
   description: "URL of the bb server",
   name: "BB_SERVER_URL",
   parse: parseRequiredUrlEnvValue,
+});
+
+export const BB_CONNECT_ORIGIN_ENV = defineEnvVar<string>({
+  description:
+    "Trusted host-local Connect cloud origin, independent of daemon transport",
+  name: "BB_CONNECT_ORIGIN",
+  parse: ({ value }) => validateConnectOrigin(value),
 });
 
 export const BB_APP_VERSION_ENV = defineEnvVar<string>({
