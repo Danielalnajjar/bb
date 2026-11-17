@@ -393,6 +393,7 @@ async function settleReaperPromiseChain(): Promise<void> {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 async function createAppFixture(
@@ -490,10 +491,9 @@ describe("createHostDaemonApp", () => {
         },
       });
       await app.machineNextTunnel.setPorts([4173]);
-      await app.machineNextTunnel.idle();
-      expect(app.machineNextTunnel.status().lastError).toContain(
-        "next.getbb.app",
-      );
+      await expect
+        .poll(() => app.machineNextTunnel.status().lastError)
+        .toContain("next.getbb.app");
     } finally {
       await app.daemon.shutdown("test-complete", 0);
       vi.unstubAllEnvs();

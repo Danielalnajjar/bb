@@ -820,6 +820,11 @@ describe("consumer-specific config", () => {
 
 it.each([
   "http://untrusted.example",
+  "https://getbb.app",
+  "https://127.0.0.1:444",
+  "https://localhost.",
+  "http://bb.localhost:42745",
+  "http://owner.localhost:42745",
   "https://owner.getbb.app/api",
   "https://owner.getbb.app?target=elsewhere",
   "https://owner.getbb.app#fragment",

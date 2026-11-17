@@ -1,3 +1,5 @@
+import { isIP } from "node:net";
+
 export function validateOptionalUrl(name: string, value: string): string {
   const trimmedValue = value.trim();
   if (trimmedValue.length === 0) {
@@ -22,15 +24,19 @@ export function validateRequiredUrl(name: string, value: string): string {
 
 export function validateConnectOrigin(value: string): string {
   const message =
-    "BB_CONNECT_ORIGIN must be an HTTPS origin, or HTTP for a local *.localhost origin";
+    "BB_CONNECT_ORIGIN must be an HTTPS relay origin (<handle>.<connect-domain>), or HTTP for a local <handle>.bb.localhost origin";
   let url: URL;
   try {
     url = new URL(value.trim());
   } catch {
     throw new Error(message);
   }
+  const labels = url.hostname.split(".");
   const local = url.hostname.endsWith(".localhost");
   if (
+    isIP(url.hostname) !== 0 ||
+    labels.length < 3 ||
+    labels.some((label) => label.length === 0) ||
     url.username !== "" ||
     url.password !== "" ||
     url.pathname !== "/" ||

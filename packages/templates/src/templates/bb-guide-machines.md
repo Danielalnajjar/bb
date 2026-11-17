@@ -342,8 +342,9 @@ A daemon using direct server transport can retain its trusted Connect relay with
 The equivalent host-local setting is `bb-app --data-dir <machine-data-dir> config
 set BB_CONNECT_ORIGIN <relay-origin>` (top-level `connectOrigin` in `config.json`),
 or environment variable `BB_CONNECT_ORIGIN`. Precedence: flag, config field,
-environment. Use an HTTPS origin, or HTTP `*.localhost:<port>` for local Connect
-development. No paths, user information, queries or fragments are accepted.
+environment. Use an HTTPS relay origin (`<handle>.<connect-domain>`), or HTTP
+`<handle>.bb.localhost:<port>` for local Connect development. No apex/IP address,
+paths, user information, queries or fragments are accepted.
 Unset preserves the enrollment/server URL for Connect and Connect Next. The
 setting applies at the next daemon start; server-provided configuration cannot
 change the credential destination.

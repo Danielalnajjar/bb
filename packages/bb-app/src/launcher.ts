@@ -1453,9 +1453,9 @@ export async function resolveBbAppRuntimeState(
   const connectOrigin =
     args.options.connectOrigin ??
     config.connectOrigin ??
-    toOptionalString(managedEnv.BB_CONNECT_ORIGIN);
+    managedEnv.BB_CONNECT_ORIGIN;
   if (connectOrigin !== undefined) {
-    managedEnv.BB_CONNECT_ORIGIN = validateConnectOrigin(connectOrigin);
+    managedEnv.BB_CONNECT_ORIGIN = connectOrigin;
   }
 
   if (args.serverUrlMode === "local") {
@@ -1602,6 +1602,7 @@ Supported keys:
 Startup-only:
   BB_LOG_LEVEL changes require a full bb-app restart with
   bb-app stop && bb-app start, or a desktop app restart.
+  BB_CONNECT_ORIGIN applies at the next host-daemon start; no server restart.
 
 Config file:
   ${formatBbAppConfigPath(dataDir)}
@@ -1627,6 +1628,7 @@ Startup-only server and launcher keys:
   Changes require a full bb-app restart with bb-app stop && bb-app start,
   or a desktop app restart. BB_APP_URL can instead be changed live with
   bb-app config.
+  BB_CONNECT_ORIGIN applies at the next host-daemon start; no server restart.
 
 Env file:
   ${formatBbAppEnvPath(dataDir)}
@@ -1961,6 +1963,15 @@ async function refreshRunningServerConfigAfterWrite(
   source: "config" | "env",
   key: string,
 ): Promise<void> {
+  if (
+    key === "BB_CONNECT_ORIGIN" ||
+    (source === "config" && key === "connectOrigin")
+  ) {
+    process.stdout.write(
+      `${key} is startup-only for the host daemon; it applies at the next daemon start. No server reload or restart is needed.\n`,
+    );
+    return;
+  }
   const refreshed = await refreshRunningServerConfig({
     required: false,
     serverUrl,
@@ -2083,7 +2094,10 @@ async function runEnvCommand(args: RunEnvCommandArgs): Promise<void> {
   if (key === "BB_SERVER_BIND_HOST") {
     parseServerBindHost(value);
   }
-  const patch = createManagedEnvPatch(key, value);
+  const patch = createManagedEnvPatch(
+    key,
+    key === "BB_CONNECT_ORIGIN" ? validateConnectOrigin(value) : value,
+  );
   await mutateManagedEnv(args.dataDir, (current) =>
     mergeManagedEnvFile(current, patch),
   );
@@ -2643,6 +2657,7 @@ export function createServerEnv(args: CreateServerEnvArgs): NodeJS.ProcessEnv {
 }
 
 export function createDaemonEnv(args: CreateDaemonEnvArgs): NodeJS.ProcessEnv {
+  const connectOrigin = args.env.BB_CONNECT_ORIGIN;
   return {
     ...hostToolchain.environment(stripThreadContextEnv(args.env)),
     BB_APP_VERSION: args.context.appVersion,
@@ -2651,6 +2666,9 @@ export function createDaemonEnv(args: CreateDaemonEnvArgs): NodeJS.ProcessEnv {
     BB_DATA_DIR: args.context.dataDir,
     BB_HOST_DAEMON_PORT: String(args.context.daemonPort),
     BB_SERVER_URL: args.serverUrl,
+    ...(connectOrigin === undefined
+      ? {}
+      : { BB_CONNECT_ORIGIN: validateConnectOrigin(connectOrigin) }),
     NODE_ENV: "production",
   };
 }

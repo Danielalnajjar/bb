@@ -885,9 +885,10 @@ bb-host-daemon --data-dir <machine-data-dir> --server-url https://server.example
 environment (including `bb-app env`). Changes apply at the next daemon start.
 Existing service arguments and the transport URL are not rewritten by this setting.
 
-The value must be a bare HTTPS origin, without user information, path, query or
-fragment. Local Connect development accepts HTTP `*.localhost` origins instead,
-including their port, using the existing local tunnel/share protocol rules.
+The value must be a bare HTTPS relay origin (`<handle>.<connect-domain>`),
+without user information, path, query or fragment, not an apex or IP address.
+Local Connect development accepts HTTP `<handle>.bb.localhost:<port>` origins
+instead, using the existing local tunnel/share protocol rules.
 When absent, the daemon keeps using its enrollment/server URL, including local
 Connect and Connect Next. This is a host-local trust decision: server sessions,
 machine environment updates and label responses cannot replace it. Label
