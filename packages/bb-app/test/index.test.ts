@@ -988,6 +988,62 @@ describe("bb-app launcher", () => {
     expect(context.serverUrl).toBe("https://bb.example.test");
   });
 
+  it("passes the trusted local Connect origin from config, env or flag to the daemon without changing transport", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "bb-connect-origin-"));
+    try {
+      writeFileSync(
+        join(dataDir, "config.json"),
+        JSON.stringify({
+          serverUrl: "https://bb-vm.tail.test:444",
+          connectOrigin: "https://configured.getbb.app",
+        }),
+      );
+      for (const [args, expected] of [
+        [[], "https://configured.getbb.app"],
+        [
+          ["--connect-origin", "https://flag.getbb.app"],
+          "https://flag.getbb.app",
+        ],
+      ] as const) {
+        const runtime = await resolveBbAppRuntimeState({
+          entrypointUrl: pathToFileURL("/repo/packages/bb-app/dist/bb-app.js")
+            .href,
+          env: {
+            BB_DATA_DIR: dataDir,
+            BB_CONNECT_ORIGIN: "https://environment.getbb.app",
+          },
+          homeDir: "/home/tester",
+          options: parseLauncherArgs([...args]).options,
+          serverUrlMode: "managed",
+        });
+        const env = createDaemonEnv({
+          context: runtime.context,
+          env: runtime.env,
+          serverUrl: runtime.context.serverUrl,
+        });
+        expect(env.BB_CONNECT_ORIGIN).toBe(expected);
+        expect(env.BB_SERVER_URL).toBe("https://bb-vm.tail.test:444");
+      }
+      writeFileSync(join(dataDir, "config.json"), "{}");
+      const runtime = await resolveBbAppRuntimeState({
+        entrypointUrl: pathToFileURL("/repo/packages/bb-app/dist/bb-app.js")
+          .href,
+        env: {
+          BB_DATA_DIR: dataDir,
+          BB_CONNECT_ORIGIN: "http://owner.bb.localhost:42745",
+        },
+        homeDir: "/home/tester",
+        options: { help: false },
+        serverUrlMode: "managed",
+      });
+      expect(runtime.env.BB_CONNECT_ORIGIN).toBe(
+        "http://owner.bb.localhost:42745",
+      );
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("uses managed config server URL over ambient env", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "bb-app-server-config-"));
     writeFileSync(
@@ -1496,6 +1552,50 @@ describe("bb-app launcher", () => {
       expect(server.reloadCount()).toBe(0);
     } finally {
       await server.close();
+    }
+  });
+
+  it("sets lists and unsets the host-local Connect origin through the CLI while preserving transport", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "bb-connect-origin-config-"));
+    const server = await startConfigReloadTestServer();
+    const args = ["--data-dir", dataDir, "--server-port", String(server.port)];
+    try {
+      const output = await captureStdout(() =>
+        runBbApp([
+          ...args,
+          "config",
+          "set",
+          "BB_CONNECT_ORIGIN",
+          "https://owner.getbb.app/",
+        ]),
+      );
+      expect(output).toContain("BB_CONNECT_ORIGIN is startup-only");
+      expect(
+        JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")),
+      ).toEqual({
+        connectOrigin: "https://owner.getbb.app",
+      });
+      expect(
+        await captureStdout(() => runBbApp([...args, "config", "list"])),
+      ).toContain("BB_CONNECT_ORIGIN=https://owner.getbb.app");
+      await expect(
+        runBbApp([
+          ...args,
+          "config",
+          "set",
+          "connectOrigin",
+          "https://owner.getbb.app/api",
+        ]),
+      ).rejects.toThrow("BB_CONNECT_ORIGIN");
+      await captureStdout(() =>
+        runBbApp([...args, "config", "unset", "connectOrigin"]),
+      );
+      expect(
+        JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")),
+      ).toEqual({});
+    } finally {
+      await server.close();
+      rmSync(dataDir, { recursive: true, force: true });
     }
   });
 
@@ -2213,6 +2313,7 @@ it("preserves machine identity and access headers through real config set and un
     serverHeaders: { "x-bb-connect-machine": "private-machine-access" },
     machineCredential: "legacy-private",
     connectMachineId: "cloud-device",
+    connectOrigin: "https://owner.getbb.app",
   };
   try {
     writeFileSync(join(dataDir, "config.json"), JSON.stringify(identity));

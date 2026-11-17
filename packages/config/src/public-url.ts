@@ -19,3 +19,27 @@ export function validateRequiredUrl(name: string, value: string): string {
     throw new Error(`${name} must be a valid URL, received "${value}"`);
   }
 }
+
+export function validateConnectOrigin(value: string): string {
+  const message =
+    "BB_CONNECT_ORIGIN must be an HTTPS origin, or HTTP for a local *.localhost origin";
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    throw new Error(message);
+  }
+  const local = url.hostname.endsWith(".localhost");
+  if (
+    url.username !== "" ||
+    url.password !== "" ||
+    url.pathname !== "/" ||
+    url.search !== "" ||
+    url.hash !== "" ||
+    url.hostname.indexOf(".") <= 0 ||
+    url.protocol !== (local ? "http:" : "https:")
+  ) {
+    throw new Error(message);
+  }
+  return url.origin;
+}

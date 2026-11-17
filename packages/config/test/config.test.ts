@@ -817,3 +817,30 @@ describe("consumer-specific config", () => {
     expect(hostDaemonEntrypointConfig).toEqual({});
   });
 });
+
+it.each([
+  "http://untrusted.example",
+  "https://owner.getbb.app/api",
+  "https://owner.getbb.app?target=elsewhere",
+  "https://owner.getbb.app#fragment",
+  "https://user:password@owner.getbb.app",
+  "https://owner.bb.localhost:42745",
+  "",
+])("rejects invalid host-local Connect origins: %s", (origin) => {
+  expect(() =>
+    loadHostDaemonConnectionConfig({
+      env: createHostDaemonRuntimeEnv({ BB_CONNECT_ORIGIN: origin }),
+    }),
+  ).toThrow("BB_CONNECT_ORIGIN");
+});
+
+it.each(["https://owner.getbb.app", "http://owner.bb.localhost:42745"])(
+  "loads a host-local Connect origin separately from transport: %s",
+  (origin) => {
+    const config = loadHostDaemonConnectionConfig({
+      env: createHostDaemonRuntimeEnv({ BB_CONNECT_ORIGIN: `${origin}/` }),
+    });
+    expect(config.BB_CONNECT_ORIGIN).toBe(origin);
+    expect(config.BB_SERVER_URL).toBe("http://localhost:4444");
+  },
+);
