@@ -56,9 +56,11 @@ it("reports lock contention without creating an index", () => {
   const db = new Database(file);
   db.exec("BEGIN IMMEDIATE");
   try {
-    const run = spawnSync(process.execPath, [entry, file], {
+    const run = spawnSync(process.execPath, [entry, file, "0"], {
       encoding: "utf8",
+      timeout: 1_500,
     });
+    expect(run.error).toBeUndefined();
     expect(run.status).toBe(1);
     expect(JSON.parse(run.stdout)).toMatchObject({
       outcome: "failed",
@@ -71,6 +73,20 @@ it("reports lock contention without creating an index", () => {
     db.exec("ROLLBACK");
     db.close();
   }
+});
+
+it.each([
+  { path: "missing", args: [] },
+  { path: "relative", args: ["relative.sqlite"] },
+])("reports INVALID_PATH for a $path database path", ({ args }) => {
+  const run = spawnSync(process.execPath, [entry, ...args], {
+    encoding: "utf8",
+  });
+  expect(run.status).toBe(1);
+  expect(JSON.parse(run.stdout)).toMatchObject({
+    outcome: "failed",
+    code: "INVALID_PATH",
+  });
 });
 
 it.each(["SIGTERM", "SIGKILL"])(

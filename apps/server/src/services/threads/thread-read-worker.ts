@@ -2,10 +2,12 @@ import { ApiError } from "../../errors.js";
 import { parentPort } from "node:worker_threads";
 import {
   createConnection,
+  getAppSettings,
   getLatestThreadSequence,
   searchThreadsWithPendingInteractionState,
   type DbConnection,
 } from "@bb/db";
+import { DEFAULT_COMPLETED_TURN_DISPLAY } from "@bb/domain";
 import { requirePublicThread } from "../lib/entity-lookup.js";
 import {
   buildThreadConversationOutlineProjectionKey,
@@ -52,9 +54,13 @@ port.on("message", (request: ThreadReadRequest) => {
     } else {
       const snapshot = db.$client.transaction(() => {
         const thread = requirePublicThread(db, task.threadId);
+        const settings = getAppSettings(db);
         const options = {
-          completedTurnDisplay: task.completedTurnDisplay,
-          includeClearedContextHistory: task.includeClearedContextHistory,
+          completedTurnDisplay:
+            settings.providerCompletedTurnDisplay[thread.providerId] ??
+            task.providerCompletedTurnDisplay ??
+            DEFAULT_COMPLETED_TURN_DISPLAY,
+          includeClearedContextHistory: settings.keepHistoryAfterContextClear,
           eventRewriteGeneration: task.eventRewriteGeneration,
           ...(task.providerDisplayName === null
             ? {}

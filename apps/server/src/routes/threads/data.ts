@@ -303,8 +303,9 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     const task = {
       kind: "outline" as const,
       threadId: thread.id,
-      completedTurnDisplay: outlineOptions.completedTurnDisplay,
-      includeClearedContextHistory: outlineOptions.includeClearedContextHistory,
+      providerCompletedTurnDisplay:
+        deps.providerRegistry.get(thread.providerId)?.info
+          .completedTurnDisplay ?? null,
       providerDisplayName: outlineOptions.providerDisplayName ?? null,
       eventRewriteGeneration: version.eventRewriteGeneration,
       role,

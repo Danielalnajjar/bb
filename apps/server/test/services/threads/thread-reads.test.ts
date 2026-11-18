@@ -2,7 +2,7 @@ import { describe, expect, it, onTestFinished } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { threadScope } from "@bb/domain";
+import { defaultAppSettings, threadScope } from "@bb/domain";
 import {
   createConnection,
   createProject,
@@ -12,6 +12,7 @@ import {
   insertEvents,
   noopNotifier,
   searchThreadsWithPendingInteractionState,
+  setAppSettings,
   upsertHost,
 } from "@bb/db";
 import { createMigratedConnection } from "@bb/db/testing";
@@ -64,8 +65,7 @@ function setup() {
     readThreadData(db, {
       kind: "outline",
       threadId: thread.id,
-      completedTurnDisplay: "collapse",
-      includeClearedContextHistory: true,
+      providerCompletedTurnDisplay: "collapse",
       providerDisplayName: null,
       eventRewriteGeneration: getThreadEventRewriteGeneration(thread.id),
       role,
@@ -76,6 +76,10 @@ function setup() {
 describe("thread read isolation", () => {
   it("returns exact outline bytes and role filtering after append and same-head rewrite", async () => {
     const { db, thread, append, outline } = setup();
+    setAppSettings(db, {
+      ...defaultAppSettings,
+      keepHistoryAfterContextClear: true,
+    });
     append(1, "alpha first 😀");
     const first = await outline();
     expect(first.kind).toBe("outline");
@@ -143,8 +147,7 @@ describe("thread read isolation", () => {
       readThreadData(db, {
         kind: "outline",
         threadId: "missing",
-        completedTurnDisplay: "collapse",
-        includeClearedContextHistory: true,
+        providerCompletedTurnDisplay: "collapse",
         providerDisplayName: null,
         eventRewriteGeneration: 0,
         role: null,

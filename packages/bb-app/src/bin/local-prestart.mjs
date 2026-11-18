@@ -5,15 +5,17 @@ import { performance } from "node:perf_hooks";
 const started = performance.now();
 let database;
 let outcome = "failed";
-let code = "INVALID_PATH";
+let code;
 try {
-  const databasePath = process.argv[2];
+  const [, , databasePath, busyTimeout = "2000"] = process.argv;
   if (typeof databasePath !== "string" || !isAbsolute(databasePath)) {
-    throw new Error("An absolute database path is required");
+    throw Object.assign(new Error("An absolute database path is required"), {
+      code: "INVALID_PATH",
+    });
   }
   database = new Database(databasePath, {
     fileMustExist: true,
-    timeout: 2_000,
+    timeout: Number(busyTimeout),
   });
   const findIndex = database.prepare(`
     SELECT 1 FROM sqlite_master

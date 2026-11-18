@@ -6,8 +6,7 @@ export type ThreadReadTask =
   | {
       kind: "outline";
       threadId: string;
-      completedTurnDisplay: CompletedTurnDisplay;
-      includeClearedContextHistory: boolean;
+      providerCompletedTurnDisplay: CompletedTurnDisplay | null;
       providerDisplayName: string | null;
       eventRewriteGeneration: number;
       serverDataVersion?: number;
