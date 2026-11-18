@@ -1179,6 +1179,12 @@ export function copyStoredThreadEventsInTransaction(
   upsertThreadSearchSegmentBatch(db, { segments, updatedAt: now });
   copyRetainedEventOutputs(db, { copiedAt: now, events: copiedIds });
   markThreadPruningWork(db, [args.targetThreadId]);
+  const root = rootConnectionOf(db);
+  if (root !== undefined) {
+    afterCommit(db, () =>
+      invalidateConversationOutlineGeneration(root, args.targetThreadId),
+    );
+  }
   return args.rows.length;
 }
 
@@ -3783,7 +3789,7 @@ export function getFirstParentedTimelineBoundarySequence(
       WHERE thread_id = ${args.threadId} AND parent_tool_call_id IS NOT NULL
       LIMIT 1
     )`
-    : sql`parent_ids(item_id) AS (parent_ids(item_id) AS (
+    : sql`parent_ids(item_id) AS (
       SELECT min(parent_tool_call_id)
       FROM events INDEXED BY events_parent_tool_call_thread_parent_sequence_idx
       WHERE thread_id = ${args.threadId} AND parent_tool_call_id IS NOT NULL

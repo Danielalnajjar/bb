@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  copyStoredThreadEventsInTransaction,
   createConnection,
   deleteThreadEventSuffixInTransaction,
   getDatabaseDataVersion,
   insertEvents,
+  listStoredEventRows,
   noopNotifier,
 } from "@bb/db";
 import { threadScope, turnScope } from "@bb/domain";
@@ -71,6 +73,43 @@ describe("file-backed public outline reads", () => {
       expect(await cached.text()).toBe(
         bytes.replace(/"maxSeq":9}$/, '"maxSeq":10}'),
       );
+    });
+  });
+
+  it("refreshes a previously read outline after a fork batch copies events", async () => {
+    await withTestHarness({ fileBackedDb: true }, async (harness) => {
+      const source = seedThreadFixture(harness);
+      const fork = seedThreadFixture(harness);
+      const path = `/api/v1/threads/${fork.thread.id}/conversation-outline`;
+      seedEvent(harness.deps, {
+        threadId: source.thread.id,
+        environmentId: source.environment.id,
+        sequence: 1,
+        type: "system/manager/user_message",
+        scope: threadScope(),
+        data: { text: "Copied fixture response" },
+      });
+      const initial = await harness.app.request(path);
+      expect(await initial.json()).toEqual({ items: [], maxSeq: 0 });
+      const rows = listStoredEventRows(harness.db, {
+        threadId: source.thread.id,
+      });
+      harness.db.transaction((tx) =>
+        copyStoredThreadEventsInTransaction(tx, {
+          rows,
+          targetEnvironmentId: fork.environment.id,
+          targetThreadId: fork.thread.id,
+        }),
+      );
+      const refreshed = await harness.app.request(path);
+      expect(refreshed.status).toBe(200);
+      const outline = threadConversationOutlineResponseSchema.parse(
+        await refreshed.json(),
+      );
+      expect(outline.maxSeq).toBe(1);
+      expect(outline.items).toEqual([
+        expect.objectContaining({ preview: "Copied fixture response" }),
+      ]);
     });
   });
 
