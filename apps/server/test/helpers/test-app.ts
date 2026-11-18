@@ -98,6 +98,7 @@ export async function installTestBuiltinPlugin(
 }
 
 export type TestAppHarnessConfigOverrides = Partial<ServerRuntimeConfig> & {
+  storage?: { dataDir: string; db: DbConnection };
   appUpdateService?: AppUpdateService;
   cliCommandService?: CliCommandService;
   terminalAttachTimeoutMs?: number;
@@ -172,12 +173,14 @@ export async function createTestAppHarness(
     nativeRootsClock,
     liveCommandsClock,
     seedFirstPartyProviders = true,
+    storage,
     tunnelIngressNow: _tunnelIngressNow,
     ...configOverrides
   } = overrides;
   const logger = createTestLogger();
-  const dataDir = await mkdtemp(join(tmpdir(), "bb-server-test-"));
-  const db = createTestDb();
+  const dataDir =
+    storage?.dataDir ?? (await mkdtemp(join(tmpdir(), "bb-server-test-")));
+  const db = storage?.db ?? createTestDb();
   setAppSettings(db, {
     ...getAppSettings(db),
     machineGitCredentialsEnabled: false,
@@ -399,12 +402,14 @@ export async function createTestAppHarness(
       setPluginEnvironmentProviderBridge(undefined);
       await pluginService.stop();
       await walCheckpointer.stop();
-      await rm(dataDir, {
-        recursive: true,
-        force: true,
-        maxRetries: 10,
-        retryDelay: 50,
-      });
+      if (storage === undefined) {
+        await rm(dataDir, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 50,
+        });
+      }
     },
   };
 }
