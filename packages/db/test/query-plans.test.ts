@@ -689,48 +689,71 @@ describe("slow query index plans", () => {
     db.$client.close();
   });
 
-  it("resolves root turn starts for the parented boundary through the turn index", () => {
-    const { db, thread } = setup();
+  it.each(["live", "historical"] as const)(
+    "seeks root turn starts and requests for the %s parented boundary",
+    (window) => {
+      const { db, thread } = setup();
+      if (window === "historical") {
+        insertEvents(
+          db,
+          noopNotifier,
+          Array.from({ length: 100 }, (_, index) => ({
+            threadId: thread.id,
+            sequence: 11 + index,
+            type: "turn/started",
+            scope: turnScope(`future-turn-${index}`),
+            parentToolCallId: `future-parent-${index}`,
+            itemId: null,
+            itemKind: null,
+            data: "{}",
+          })),
+        );
+      }
 
-    const captured = captureStatements(db, () => {
-      expect(
-        getFirstParentedTimelineBoundarySequence(db, {
-          maxSeq: 10,
-          sequenceStart: 0,
-          threadId: thread.id,
-        }),
-      ).toBeNull();
-    });
-    const query = captured.find((entry) => entry.sql.includes("root_start"));
-    if (!query) {
-      throw new Error("Expected the parented timeline boundary SQL");
-    }
-    const details = queryPlanDetails({
-      db,
-      params: query.params,
-      sql: query.sql,
-    });
-    expect(details).toMatch(
-      /SEARCH events USING INDEX events_thread_type_sequence_idx \(thread_id=\? AND type=\? AND sequence>\? AND sequence<\?\)/u,
-    );
-    expect(details).not.toContain("SCAN spans");
-    expect(details).toMatch(
-      /SEARCH root_start (?:EXISTS )?USING (?:COVERING )?INDEX events_thread_turn_type_item_sequence_idx \(thread_id=\? AND turn_id=\? AND type=\?\)/u,
-    );
-    expect(details).toMatch(
-      /SEARCH events USING COVERING INDEX events_parent_tool_call_thread_parent_sequence_idx \(thread_id=\? AND parent_tool_call_id>\?\)/u,
-    );
-    expect(details).toContain("CO-ROUTINE parent_ids");
-    expect(details).toMatch(
-      /SEARCH next USING COVERING INDEX events_parent_tool_call_thread_parent_sequence_idx \(thread_id=\? AND parent_tool_call_id>\?\)/u,
-    );
-    expect(details).toMatch(
-      /SEARCH parent USING (?:COVERING )?INDEX events_delegating_item_lookup_idx \(thread_id=\? AND item_id=\? AND sequence>\? AND sequence<\?\)/u,
-    );
-    expect(details).not.toContain("nested_history");
+      const captured = captureStatements(db, () => {
+        expect(
+          getFirstParentedTimelineBoundarySequence(db, {
+            maxSeq: 10,
+            sequenceStart: 0,
+            threadId: thread.id,
+          }),
+        ).toBeNull();
+      });
+      const query = captured.find((entry) => entry.sql.includes("root_start"));
+      if (!query) {
+        throw new Error("Expected the parented timeline boundary SQL");
+      }
+      const details = queryPlanDetails({
+        db,
+        params: query.params,
+        sql: query.sql,
+      });
+      expect(details).toMatch(
+        /SEARCH events USING INDEX events_thread_type_sequence_idx \(thread_id=\? AND type=\? AND sequence>\? AND sequence<\?\)/u,
+      );
+      expect(details).not.toContain("SCAN spans");
+      expect(details).toMatch(
+        /SEARCH root_start (?:EXISTS )?USING (?:COVERING )?INDEX events_thread_turn_type_item_sequence_idx \(thread_id=\? AND turn_id=\? AND type=\?\)/u,
+      );
+      expect(details).toMatch(
+        /SEARCH events USING COVERING INDEX events_parent_tool_call_thread_parent_sequence_idx \(thread_id=\? AND parent_tool_call_id>\?\)/u,
+      );
+      if (window === "live") {
+        expect(details).toContain("CO-ROUTINE parent_ids");
+        expect(details).toMatch(
+          /SEARCH next USING COVERING INDEX events_parent_tool_call_thread_parent_sequence_idx \(thread_id=\? AND parent_tool_call_id>\?\)/u,
+        );
+        expect(details).toMatch(
+          /SEARCH parent USING (?:COVERING )?INDEX events_delegating_item_lookup_idx \(thread_id=\? AND item_id=\? AND sequence>\? AND sequence<\?\)/u,
+        );
+      } else {
+        expect(details).toContain("nested_history");
+        expect(details).not.toContain("parent_ids");
+      }
 
-    db.$client.close();
-  });
+      db.$client.close();
+    },
+  );
 
   it.each([
     {

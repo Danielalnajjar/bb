@@ -99,11 +99,12 @@ export function registerListCommand(
           flagName: "--section",
           value: opts.section,
         });
-        const archived = opts.archived !== undefined
-          ? opts.archived
-          : opts.includeArchived || threadIds.length > 0
-            ? undefined
-            : false;
+        const archived =
+          opts.archived !== undefined
+            ? opts.archived
+            : opts.includeArchived || threadIds.length > 0
+              ? undefined
+              : false;
         const threads = await sdk.threads.list({
           ...(projectId ? { projectId } : {}),
           ...(environmentId ? { environmentId } : {}),

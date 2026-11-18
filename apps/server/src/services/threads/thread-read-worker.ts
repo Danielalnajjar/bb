@@ -66,7 +66,11 @@ port.on("message", (request: ThreadReadRequest) => {
         };
         return {
           response: loadThreadConversationOutline(db, thread, options),
-          projectionKey: buildThreadConversationOutlineProjectionKey(thread, 0, options),
+          projectionKey: buildThreadConversationOutlineProjectionKey(
+            thread,
+            0,
+            options,
+          ),
         };
       })();
       const response = {

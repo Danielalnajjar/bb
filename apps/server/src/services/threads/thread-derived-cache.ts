@@ -23,7 +23,12 @@ export interface ThreadDerivedCacheRead<T> {
 
 export interface ThreadDerivedCache<T> {
   get(slot: string, revision: string): T | undefined;
-  store(slot: string, revision: string, threadId: string, built: ThreadDerivedCacheBuild<T>): void;
+  store(
+    slot: string,
+    revision: string,
+    threadId: string,
+    built: ThreadDerivedCacheBuild<T>,
+  ): void;
   getOrBuild(read: ThreadDerivedCacheRead<T>): T;
   invalidateThread(threadId: string): void;
   readonly size: number;

@@ -335,7 +335,8 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     if (
       !versionChanged &&
       keyFor(current, currentOptions) === cacheKey &&
-      result.projectionKey === buildThreadConversationOutlineProjectionKey(current, 0, currentOptions)
+      result.projectionKey ===
+        buildThreadConversationOutlineProjectionKey(current, 0, currentOptions)
     ) {
       conversationOutlineCache.store(slot, cacheKey, thread.id, {
         expiresAt: null,
