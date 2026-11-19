@@ -216,6 +216,10 @@ function toRuntimeExecutionOptions(
     input: args.input,
     providerId: args.providerId,
   });
+  const compactLimit = getThreadCodexAutoCompactTokenLimit(
+    args.deps.db,
+    args.threadId,
+  );
   const providerOptions =
     args.deps.providerRegistry.get(args.providerId)?.deriveProviderOptions({
       threadId: args.threadId,
@@ -223,11 +227,10 @@ function toRuntimeExecutionOptions(
       model: args.execution.model,
       permissionMode,
       ...(promptMode !== undefined ? { promptMode } : {}),
+      ...(compactLimit !== undefined
+        ? { autoCompactTokenLimit: compactLimit }
+        : {}),
     }) ?? {};
-  const compactLimit =
-    args.providerId === "codex"
-      ? getThreadCodexAutoCompactTokenLimit(args.deps.db, args.threadId)
-      : undefined;
   const sessionOptions = resolvePendingThreadSessionOptions(
     args.deps.db,
     args.threadId,
@@ -262,10 +265,7 @@ function toRuntimeExecutionOptions(
     ...(reasoningLevel === undefined ? {} : { reasoningLevel }),
     ...(promptMode !== undefined ? { promptMode } : {}),
     ...(Object.keys(sessionOptions).length > 0 ? { sessionOptions } : {}),
-    providerOptions:
-      compactLimit === undefined
-        ? providerOptions
-        : { ...providerOptions, codexAutoCompactTokenLimit: compactLimit },
+    providerOptions,
   };
   if (permissionMode === "full") {
     return {

@@ -418,14 +418,12 @@ export function createThread(
           createdThread.sourceThreadId,
           createdThread.id,
         );
-        if (createdThread.providerId === "codex") {
-          compactLimit ??= getThreadCodexAutoCompactTokenLimit(
-            tx,
-            createdThread.sourceThreadId,
-          );
-        }
+        compactLimit ??= getThreadCodexAutoCompactTokenLimit(
+          tx,
+          createdThread.sourceThreadId,
+        );
       }
-      if (createdThread.providerId === "codex" && compactLimit !== undefined) {
+      if (compactLimit !== undefined) {
         insertThreadCodexAutoCompactTokenLimit(tx, createdThread.id, compactLimit);
       }
       upsertThreadTitleSearchSegments(tx, {
