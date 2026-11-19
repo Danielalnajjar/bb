@@ -939,19 +939,19 @@ describe("queue recovery", () => {
           () => true,
         ),
       ).toHaveLength(1);
-      const listedIds = async () => {
+      const listedRows = async () => {
         const response = await harness.app.request(
           `/api/v1/threads/${thread.id}/queued-messages`,
         );
-        const rows: { id: string }[] = await response.json();
-        return rows.map((row) => row.id);
+        const rows: { id: string; state: string }[] = await response.json();
+        return rows.map(({ id, state }) => ({ id, state }));
       };
       const turnsBefore = turnRequests(harness, thread.id).length;
-      expect(await listedIds()).toEqual([]);
+      expect(await listedRows()).toEqual([{ id: queued.id, state: "claimed" }]);
 
       await runStartupRecoverySweep(harness.deps);
 
-      expect(await listedIds()).toEqual([queued.id]);
+      expect(await listedRows()).toEqual([{ id: queued.id, state: "queued" }]);
       await runQueuedMessageDispatch(harness.deps, {
         kind: "idle-recovery",
         now: Date.now(),
@@ -959,7 +959,7 @@ describe("queue recovery", () => {
       const turns = turnRequests(harness, thread.id);
       expect(turns).toHaveLength(turnsBefore + 1);
       expect(turns.at(-1)?.data).toContain("ORPHANED CLAIM");
-      expect(await listedIds()).toEqual([]);
+      expect(await listedRows()).toEqual([]);
     });
   });
 });

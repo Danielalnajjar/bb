@@ -388,7 +388,7 @@ it.each(["plugin recheck", "due sweep"] as const)(
   },
 );
 
-it.fails.each(["before automation", "during automation"] as const)(
+it.each(["before automation", "during automation"] as const)(
   "skills#1536 protects a human claim made %s",
   async (order) => {
     await withTestHarness(async (harness) => {

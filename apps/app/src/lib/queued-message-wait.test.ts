@@ -234,6 +234,16 @@ describe("queuedMessageFallbackTitle", () => {
 });
 
 describe("isQueuedMessageSendNowAllowed", () => {
+  it("does not offer Send now for a claimed message even if it has a failure reason", () => {
+    expect(
+      isQueuedMessageSendNowAllowed({
+        state: "claimed",
+        waitingOn: null,
+        failureReason: "Provider unavailable",
+      }),
+    ).toBe(false);
+  });
+
   it.each([
     { waitingOn: null, allowed: true },
     { waitingOn: { kind: "time" }, allowed: true },
@@ -251,10 +261,15 @@ describe("isQueuedMessageSendNowAllowed", () => {
     "allows manual recovery for $waitingOn",
     ({ waitingOn, allowed }) => {
       expect(
-        isQueuedMessageSendNowAllowed({ waitingOn, failureReason: null }),
+        isQueuedMessageSendNowAllowed({
+          state: "queued",
+          waitingOn,
+          failureReason: null,
+        }),
       ).toBe(allowed);
       expect(
         isQueuedMessageSendNowAllowed({
+          state: "failed_retrying",
           waitingOn,
           failureReason: "Provider unavailable",
         }),

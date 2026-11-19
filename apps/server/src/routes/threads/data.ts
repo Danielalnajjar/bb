@@ -6,7 +6,7 @@ import {
   patchThreadPluginMetadata,
   getLatestThreadSequence,
   getThreadEventRewriteGeneration,
-  listQueuedThreadMessages,
+  listThreadQueuedMessagesIncludingClaims,
 } from "@bb/db";
 import type { Hono } from "hono";
 import {
@@ -406,7 +406,9 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     const threadId = context.req.param("id");
     requirePublicThread(deps.db, threadId);
     return context.json(
-      listQueuedThreadMessages(deps.db, threadId).map(toThreadQueuedMessage),
+      listThreadQueuedMessagesIncludingClaims(deps.db, threadId).map(
+        toThreadQueuedMessage,
+      ),
     );
   });
 

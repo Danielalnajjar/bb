@@ -519,6 +519,59 @@ describe("bb thread organization commands", () => {
     expect(update).not.toHaveBeenCalled();
   });
 
+  it("refuses to update a claimed row without uploading its attachment", async () => {
+    const list = vi.fn(async () => [
+      queuedMessage({ state: "claimed", editable: false }),
+    ]);
+    const update = vi.fn(async () => queuedMessage({}));
+    stubServerApi({
+      "v1.threads.:id.queued-messages.$get": list,
+      "v1.threads.:id.$get": async () => ({ projectId: "remote-project" }),
+      "v1.threads.:id.queued-messages.:queuedMessageId.$patch": update,
+    });
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          type: "localFile",
+          path: "durable-token",
+          name: "report.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 6,
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const dir = await mkdtemp(join(tmpdir(), "bb-queue-attachment-"));
+    try {
+      const file = join(dir, "report.pdf");
+      await writeFile(file, "report");
+      await expect(
+        runCommand(
+          [
+            "thread",
+            "queue",
+            "update",
+            "thread-1",
+            "queued-1",
+            "revised",
+            "--file",
+            file,
+          ],
+          register,
+        ),
+      ).rejects.toThrow("process.exit:1");
+
+      expect(console.error).toHaveBeenCalledWith(
+        "Error: Queued message queued-1 is being sent and cannot be edited.",
+      );
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+    } finally {
+      await rm(dir, { recursive: true });
+    }
+  });
+
   it("reports when sending a queued message leaves it waiting", async () => {
     const send = vi.fn(async () => ({
       ok: true,

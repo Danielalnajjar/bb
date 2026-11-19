@@ -582,6 +582,18 @@ export function listQueuedThreadMessages(
     .all();
 }
 
+export function listThreadQueuedMessagesIncludingClaims(
+  db: DbQueryConnection,
+  threadId: string,
+): QueuedThreadMessageRow[] {
+  return db
+    .select()
+    .from(queuedThreadMessages)
+    .where(eq(queuedThreadMessages.threadId, threadId))
+    .orderBy(asc(queuedThreadMessages.sortKey), asc(queuedThreadMessages.id))
+    .all();
+}
+
 export function getQueuedThreadStartMessage(
   db: DbQueryConnection,
   threadId: string,

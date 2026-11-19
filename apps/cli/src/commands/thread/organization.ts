@@ -517,6 +517,11 @@ export function registerOrganizationCommands(
               `Queued message ${messageId} not found on thread ${threadId}.`,
             );
           }
+          if (existing.state === "claimed") {
+            throw new Error(
+              `Queued message ${messageId} is being sent and cannot be edited.`,
+            );
+          }
           const input =
             message === undefined
               ? undefined

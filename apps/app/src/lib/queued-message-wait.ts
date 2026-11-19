@@ -2,6 +2,7 @@ import {
   RESTART_RESUME_RETRY_REASON,
   type QueuedMessagePayload,
   type QueuedMessageWaitingOn,
+  type ThreadQueuedMessage,
   type ThreadStatus,
 } from "@bb/domain";
 import type { IconName } from "@bb/shared-ui/icon";
@@ -29,12 +30,14 @@ export function formatQueuedMessageCountdown(
 }
 
 export function isQueuedMessageSendNowAllowed({
+  state,
   waitingOn,
   failureReason,
-}: {
-  waitingOn: QueuedMessageWaitingOn | null;
-  failureReason: string | null;
-}): boolean {
+}: Pick<
+  ThreadQueuedMessage,
+  "state" | "waitingOn" | "failureReason"
+>): boolean {
+  if (state === "claimed") return false;
   if (failureReason !== null) return true;
   if (waitingOn === null) return true;
   switch (waitingOn.kind) {

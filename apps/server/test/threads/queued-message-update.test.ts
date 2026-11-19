@@ -333,6 +333,39 @@ describe("changing when a queued message sends", () => {
   });
 });
 
+it("lists claimed rows in queue order without changing unclaimed rows", async () => {
+  await withTestHarness(async (harness) => {
+    const thread = seedIdleThread(harness, "host-queue-list-claims");
+    const sendAt = Date.now() + HOUR_MS;
+    const first = await scheduleMessage(harness, thread.id, "First", sendAt);
+    const next = await scheduleMessage(harness, thread.id, "Next", sendAt);
+
+    const claimed = claimQueuedThreadMessageGroup(
+      harness.db,
+      harness.hub,
+      first.id,
+      { kind: "explicit-send" },
+    );
+    expect(claimed).toMatchObject([{ id: first.id, state: "claimed" }]);
+
+    const response = await harness.app.request(
+      `/api/v1/threads/${thread.id}/queued-messages`,
+    );
+    expect(response.status).toBe(200);
+    expect(
+      threadQueuedMessageSchema.array().parse(await readJson(response)),
+    ).toEqual([
+      expect.objectContaining({
+        id: first.id,
+        content: first.content,
+        state: "claimed",
+        editable: false,
+      }),
+      next,
+    ]);
+  });
+});
+
 describe("a queued bb notice", () => {
   it("reports its notice, is not editable, and refuses a rewrite", async () => {
     await withTestHarness(async (harness) => {
