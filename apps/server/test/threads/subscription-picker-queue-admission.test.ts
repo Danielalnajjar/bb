@@ -332,7 +332,7 @@ it.fails("skills#1536 keeps a busy-held next-turn prompt paused by Stop through 
   });
 });
 
-it.fails.each(["plugin recheck", "due sweep"] as const)(
+it.each(["plugin recheck", "due sweep"] as const)(
   "skills#1536 preserves retry not-before through %s",
   async (wake) => {
     await withTestHarness(async (harness) => {

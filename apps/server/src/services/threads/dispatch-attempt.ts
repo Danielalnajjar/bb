@@ -26,10 +26,10 @@ import {
   type QueuedMessagePayload,
   type QueuedMessageDeliveryMode,
   type QueuedMessageSystemNotice,
-  type QueuedMessageWaitingOn,
   type ResolvedThreadExecutionOptions,
   startedOnBehalfOfSchema,
   type StartedOnBehalfOf,
+  type StoredQueuedMessageWaitingOn,
   type Thread,
   type ThreadCreateOrigin,
   type ThreadQueuedMessage,
@@ -476,7 +476,7 @@ async function runDispatchAttempt(
 
   const retriesGoFirst = getAppSettings(deps.db).resumeThreadsAfterRestart;
   const waitOn = (
-    waitingOn: QueuedMessageWaitingOn,
+    waitingOn: StoredQueuedMessageWaitingOn,
     sendAt: number | null,
   ): DispatchAttemptOutcome => {
     const entry = recordQueuedMessageWait(deps, {
@@ -702,14 +702,24 @@ async function runDispatchAttempt(
       if (claimed !== null) {
         noteDispatchRequeued(thread.id, outcome.waiter.pluginId);
       }
-      return waitOn(
-        {
-          kind: "plugin",
-          pluginId: outcome.waiter.pluginId,
-          reason: dispatchWaitReasonForPass(outcome),
-        },
-        outcome.waiter.sendAt,
-      );
+      const callerSendAt = payload.sendAt ?? null;
+      const notBefore =
+        args.queuePayload.kind === "retry" &&
+        callerSendAt !== null &&
+        callerSendAt > Date.now()
+          ? callerSendAt
+          : null;
+      const wait = {
+        kind: "plugin" as const,
+        pluginId: outcome.waiter.pluginId,
+        reason: dispatchWaitReasonForPass(outcome),
+      };
+      return notBefore === null
+        ? waitOn(wait, outcome.waiter.sendAt)
+        : waitOn(
+            { ...wait, notBefore },
+            Math.max(notBefore, outcome.waiter.sendAt ?? notBefore),
+          );
     }
   } else {
     await continueThroughCoreWaits();
@@ -797,7 +807,7 @@ async function reattemptDispatchForThreadChange(
   thread: Thread | null,
   run: DispatchAttemptRun,
   waitOn: (
-    waitingOn: QueuedMessageWaitingOn,
+    waitingOn: StoredQueuedMessageWaitingOn,
     sendAt: number | null,
   ) => DispatchAttemptOutcome,
 ): Promise<DispatchAttemptOutcome> {

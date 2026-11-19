@@ -40,8 +40,8 @@ import type {
   StartedOnBehalfOf,
   ThreadCreateOrigin,
   QueuedMessageWaitHolder,
-  QueuedMessageWaitingOn,
   QueuedMessageWaitingOnKind,
+  StoredQueuedMessageWaitingOn,
 } from "@bb/domain";
 import type {
   DbConnection,
@@ -90,7 +90,7 @@ export interface CreateQueuedThreadMessageInput {
    * could be claimed by a concurrent drain, which is exactly the dispatch the
    * wait exists to prevent.
    */
-  waitingOn: QueuedMessageWaitingOn | null;
+  waitingOn: StoredQueuedMessageWaitingOn | null;
   sendAt: number | null;
   payload: QueuedMessagePayload;
   /** Non-null only for one of core's own system notices. */
@@ -148,7 +148,7 @@ type QueuedMessageTransition =
   | {
       event: "wait.recorded";
       sendAt: number | null;
-      waitingOn: QueuedMessageWaitingOn;
+      waitingOn: StoredQueuedMessageWaitingOn;
     }
   | { event: "wait.cleared" }
   | { claimToken: string; event: "dispatch.claimed" }
@@ -1820,7 +1820,7 @@ export interface RequeueClaimedQueuedThreadMessagesArgs {
   /** Every row the drain claimed, lead first. */
   claims: readonly ClaimedQueuedThreadMessageMutationArgs[];
   threadId: string;
-  waitingOn: QueuedMessageWaitingOn;
+  waitingOn: StoredQueuedMessageWaitingOn;
   sendAt: number | null;
 }
 
@@ -2137,7 +2137,7 @@ export function listQueuedThreadMessageCountsByThreadIds(
  * same value.
  */
 function waitHolderFor(
-  waitingOn: QueuedMessageWaitingOn,
+  waitingOn: StoredQueuedMessageWaitingOn,
 ): QueuedMessageWaitHolder | null {
   return waitingOn.kind === "plugin"
     ? `${QUEUED_MESSAGE_PLUGIN_WAIT_HOLDER_PREFIX}${waitingOn.pluginId}`
@@ -2147,7 +2147,7 @@ function waitHolderFor(
 export interface SetQueuedThreadMessageWaitingOnArgs {
   id: string;
   threadId: string;
-  waitingOn: QueuedMessageWaitingOn;
+  waitingOn: StoredQueuedMessageWaitingOn;
   /**
    * The row's scheduled instant. Passed on every call rather than left alone,
    * because a re-queue is a fresh statement of when this row may run: a

@@ -6,7 +6,10 @@ import {
   listRunningThreads,
   setQueuedThreadMessageGroupBoundary,
 } from "@bb/db";
-import type { ThreadQueuedMessage } from "@bb/domain";
+import {
+  turnRequestEventDataSchema,
+  type ThreadQueuedMessage,
+} from "@bb/domain";
 import { createDeferredPromise } from "@bb/test-helpers";
 import type { StartedOnBehalfOf } from "@bb/domain";
 import type {
@@ -30,6 +33,7 @@ import { acceptThreadSendRequest } from "../../src/services/threads/thread-send-
 import { attemptDispatch } from "../../src/services/threads/dispatch-attempt.js";
 import { runQueuedMessageDispatch } from "../../src/services/threads/queued-message-dispatch.js";
 import { createThreadFromRequest } from "../../src/services/threads/thread-create.js";
+import { retryFailedTurn } from "../../src/services/threads/turn-retry.js";
 import { moveThreadStatus } from "../helpers/thread-status.js";
 import { createClientTurnRequestId } from "../../src/services/threads/thread-events.js";
 import { toThreadQueuedMessage } from "../../src/services/threads/thread-queued-messages.js";
@@ -1439,4 +1443,126 @@ describe("message.dispatch hooks on the queue drain", () => {
       ).toEqual([]);
     });
   });
+});
+
+describe("a retry's caller not-before under a plugin hold", () => {
+  it.each(["plugin unregister", "orphan sweep"] as const)(
+    "keeps the retry scheduled at its not-before after %s",
+    async (clear) => {
+      await withTestHarness(async (harness) => {
+        const registry = emptyRegistry();
+        registry["message.dispatch"].push({
+          pluginId: "limiter",
+          handler: () => ({ action: "wait", reason: "Account at capacity" }),
+        });
+        installHooks(registry);
+        const hostId = `host-not-before-${clear.replace(" ", "-")}`;
+        const { environment, project } = seedDispatchFixture(harness, hostId);
+        const thread = seedThread(harness.deps, {
+          environmentId: environment.id,
+          projectId: project.id,
+          status: "active",
+        });
+        seedThreadRuntimeState(harness.deps, {
+          environmentId: environment.id,
+          inputText: "Do the thing",
+          providerThreadId: `provider-${hostId}`,
+          threadId: thread.id,
+        });
+        moveThreadStatus(harness.deps, {
+          move: "run.failed",
+          threadId: thread.id,
+        });
+        const requests = () =>
+          turnRequests(harness, thread.id).map((event) =>
+            turnRequestEventDataSchema.parse(JSON.parse(event.data)),
+          );
+        const [original] = requests();
+        if (original === undefined) throw new Error("expected a failed turn");
+        const failed = getThread(harness.db, thread.id);
+        if (failed === null) throw new Error("expected a thread");
+        const notBefore = Date.now() + 60_000;
+        const publicWait = {
+          kind: "plugin",
+          pluginId: "limiter",
+          reason: "Account at capacity",
+        };
+
+        const retry = await retryFailedTurn(harness.deps, {
+          thread: failed,
+          request: {
+            turnRequestId: null,
+            sendAt: notBefore,
+            reason: "Rate limited",
+          },
+        });
+
+        expect(retry).toEqual({
+          ok: true,
+          delivery: "queued",
+          turnRequestId: original.requestId,
+          attempt: 2,
+          queuedMessageId: expect.any(String),
+          waitingOn: publicWait,
+          sendAt: notBefore,
+        });
+        expect(listQueuedThreadMessages(harness.db, thread.id)).toMatchObject([
+          {
+            waitingOn: JSON.stringify({ ...publicWait, notBefore }),
+            sendAt: notBefore,
+          },
+        ]);
+        const listed = await harness.app.request(
+          `/api/v1/threads/${thread.id}/queued-messages`,
+        );
+        const listedRows: { waitingOn: unknown }[] = await listed.json();
+        expect(listedRows.map(({ waitingOn }) => waitingOn)).toEqual([
+          publicWait,
+        ]);
+
+        setPluginHookProvider(undefined);
+        await runQueuedMessageDispatch(
+          harness.deps,
+          clear === "plugin unregister"
+            ? { kind: "plugin-unregistered", pluginId: "limiter" }
+            : {
+                kind: "orphaned-plugin-recovery",
+                plugins: { isPluginExpectedToRun: () => false },
+              },
+        );
+        await runQueuedMessageDispatch(harness.deps, {
+          kind: "time-reached",
+          now: notBefore - 1,
+        });
+
+        expect(queuedRows(harness, thread.id)).toMatchObject([
+          {
+            id: retry.delivery === "queued" ? retry.queuedMessageId : null,
+            waitingOn: { kind: "time" },
+            sendAt: notBefore,
+            payload: {
+              kind: "retry",
+              retryOfTurnRequestId: original.requestId,
+              attempt: 2,
+            },
+          },
+        ]);
+        expect(requests()).toHaveLength(1);
+
+        await runQueuedMessageDispatch(harness.deps, {
+          kind: "time-reached",
+          now: notBefore,
+        });
+
+        expect(requests().slice(1)).toMatchObject([
+          {
+            initiator: "system",
+            retryOfRequestId: original.requestId,
+            retryAttempt: 2,
+          },
+        ]);
+        expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([]);
+      });
+    },
+  );
 });

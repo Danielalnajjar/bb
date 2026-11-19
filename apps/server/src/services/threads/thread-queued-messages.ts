@@ -1,7 +1,7 @@
 import {
   promptInputSchema,
   queuedMessageSystemNoticeSchema,
-  queuedMessageWaitingOnSchema,
+  storedQueuedMessageWaitingOnSchema,
   threadQueuedMessageSchema,
 } from "@bb/domain";
 import type {
@@ -11,8 +11,8 @@ import type {
   QueuedMessagePayloadKind,
   QueuedMessageState,
   QueuedMessageSystemNotice,
-  QueuedMessageWaitingOn,
   StartedOnBehalfOf,
+  StoredQueuedMessageWaitingOn,
   StartedOnBehalfOfInitiator,
   ThreadQueuedMessage,
   ThreadCreateOrigin,
@@ -76,7 +76,7 @@ function parseStoredQueuedThreadMessageContent(
 
 export function parseStoredQueuedThreadMessageWaitingOn(
   row: Pick<StoredQueuedThreadMessageRow, "id" | "threadId" | "waitingOn">,
-): QueuedMessageWaitingOn | null {
+): StoredQueuedMessageWaitingOn | null {
   if (row.waitingOn === null) return null;
 
   let waitingOn: unknown;
@@ -90,7 +90,7 @@ export function parseStoredQueuedThreadMessageWaitingOn(
     );
   }
 
-  const parsed = queuedMessageWaitingOnSchema.safeParse(waitingOn);
+  const parsed = storedQueuedMessageWaitingOnSchema.safeParse(waitingOn);
   if (!parsed.success) {
     throw new ApiError(
       500,

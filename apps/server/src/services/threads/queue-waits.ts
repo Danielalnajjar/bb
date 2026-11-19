@@ -2,7 +2,9 @@ import {
   moveQueuedThreadMessageToFrontInTransaction,
   clearQueuedThreadMessageWaitingOn,
   createQueuedThreadMessageInTransaction,
+  getQueuedThreadMessage,
   requeueClaimedQueuedThreadMessages,
+  setQueuedThreadMessageWaitingOn,
   type ClaimedQueuedThreadMessageRow,
   type DbConnection,
   type DbNotifier,
@@ -14,9 +16,9 @@ import type {
   QueuedMessageDeliveryMode,
   QueuedMessagePayload,
   QueuedMessageSystemNotice,
-  QueuedMessageWaitingOn,
   ResolvedThreadExecutionOptions,
   StartedOnBehalfOf,
+  StoredQueuedMessageWaitingOn,
   Thread,
   ThreadCreateOrigin,
   ThreadQueuedMessage,
@@ -26,7 +28,10 @@ import {
   emitPluginMessageDispatched,
   emitPluginMessageQueued,
 } from "../plugins/plugin-thread-events.js";
-import { toThreadQueuedMessage } from "./thread-queued-messages.js";
+import {
+  parseStoredQueuedThreadMessageWaitingOn,
+  toThreadQueuedMessage,
+} from "./thread-queued-messages.js";
 import { assertThreadHostAcceptsWork } from "./thread-host-admission.js";
 
 type QueueWaitDeps = { db: DbQueryConnection; hub: DbNotifier };
@@ -84,7 +89,7 @@ export interface RecordQueuedMessageWaitArgs {
   thread: Thread;
   message: QueuedDispatchMessage;
   placement: "back" | "front";
-  waitingOn: QueuedMessageWaitingOn;
+  waitingOn: StoredQueuedMessageWaitingOn;
   /**
    * The row's scheduled instant. Passed every time the wait is written rather
    * than left alone, because writing a wait is a fresh statement of when this
@@ -188,6 +193,21 @@ export function clearQueuedMessageWait(
   deps: { db: DbConnection; hub: DbNotifier },
   args: { queuedMessageId: string; threadId: string },
 ): QueuedThreadMessageRow | null {
+  const row = getQueuedThreadMessage(deps.db, args.queuedMessageId);
+  const waitingOn =
+    row === null ? null : parseStoredQueuedThreadMessageWaitingOn(row);
+  if (
+    waitingOn?.kind === "plugin" &&
+    waitingOn.notBefore !== undefined &&
+    waitingOn.notBefore > Date.now()
+  ) {
+    return setQueuedThreadMessageWaitingOn(deps.db, deps.hub, {
+      id: args.queuedMessageId,
+      threadId: args.threadId,
+      waitingOn: { kind: "time" },
+      sendAt: waitingOn.notBefore,
+    });
+  }
   return clearQueuedThreadMessageWaitingOn(deps.db, deps.hub, {
     id: args.queuedMessageId,
     threadId: args.threadId,

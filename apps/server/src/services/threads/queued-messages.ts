@@ -114,8 +114,11 @@ export function createAutomaticQueuedMessageGroupEligibility(
       const waitingOn = parseStoredQueuedThreadMessageWaitingOn(member);
       switch (waitingOn?.kind) {
         case undefined:
-        case "plugin":
           return true;
+        case "plugin":
+          return (
+            waitingOn.notBefore === undefined || waitingOn.notBefore <= args.now
+          );
         case "time":
           return member.sendAt !== null && member.sendAt <= args.now;
         case "thread-busy":
@@ -492,6 +495,9 @@ async function sendClaimedQueuedMessageForThread(
       ? sendModeForDeliveryMode(args.queuedMessages)
       : args.mode;
   const systemNotice = parseStoredQueuedThreadMessageSystemNotice(lead);
+  const leadWait = parseStoredQueuedThreadMessageWaitingOn(lead);
+  const notBefore =
+    leadWait?.kind === "plugin" ? (leadWait.notBefore ?? null) : null;
   const outcome = await attemptDispatch(deps, {
     thread: args.thread,
     payload: {
@@ -503,6 +509,7 @@ async function sendClaimedQueuedMessageForThread(
           )
         : { input, mode }),
       ...(inputGroups.length > 1 ? { inputGroups } : {}),
+      ...(notBefore === null ? {} : { sendAt: notBefore }),
     },
     source: {
       kind: "drain",
