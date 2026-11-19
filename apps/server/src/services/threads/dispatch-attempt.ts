@@ -60,9 +60,12 @@ import {
 import {
   createQueuedMessageAutoSendPausedError,
   createQueuedMessageClaimLostError,
+  isOrdinaryTurnEndPluginHold,
+  isTurnEndPluginHoldReady,
   recordQueuedMessageWait,
-  settleQueueRowDispatched,
+  settleQueueRowsDispatched,
   type QueuedDispatchMessage,
+  type TurnEndPluginHoldKind,
 } from "./queue-waits.js";
 import { runThreadLifecycleInTransaction } from "./lifecycle/run.js";
 import { buildExecutionOptions } from "./thread-commands.js";
@@ -448,6 +451,13 @@ async function runDispatchAttempt(
   const sendNow = args.source.kind === "drain" && args.source.sendNow;
   const respectManualStopPause =
     args.source.kind === "drain" && args.source.respectManualStopPause;
+  const ordinaryPluginHold =
+    respectManualStopPause && claimed?.some(isOrdinaryTurnEndPluginHold);
+  const assertPluginHoldNotStopPaused = () => {
+    if (ordinaryPluginHold && isThreadQueueAutoSendPaused(deps.db, thread.id)) {
+      throw createQueuedMessageAutoSendPausedError();
+    }
+  };
   const attempt = resolveDispatchAttemptKind(thread, payload.mode);
 
   const execution = await buildExecutionOptions(
@@ -478,6 +488,7 @@ async function runDispatchAttempt(
   const waitOn = (
     waitingOn: StoredQueuedMessageWaitingOn,
     sendAt: number | null,
+    turnEndWait: TurnEndPluginHoldKind | null = null,
   ): DispatchAttemptOutcome => {
     const entry = recordQueuedMessageWait(deps, {
       thread,
@@ -485,9 +496,16 @@ async function runDispatchAttempt(
       placement:
         retriesGoFirst && args.queuePayload.kind === "retry" ? "front" : "back",
       waitingOn,
+      turnEndWait,
       sendAt,
       claimed,
     });
+    if (turnEndWait !== null && isTurnEndPluginHoldReady(deps, thread.id)) {
+      requestQueuedMessageDispatch(deps, {
+        kind: "thread-ready",
+        threadId: thread.id,
+      });
+    }
     if (entry === null) {
       // The row vanished under a re-queue (the user deleted it). Nothing is
       // waiting and nothing dispatched; report it as dispatched-away so the
@@ -511,6 +529,7 @@ async function runDispatchAttempt(
   };
 
   const continueThroughCoreWaits = async (): Promise<void> => {
+    assertPluginHoldNotStopPaused();
     const sendAt = payload.sendAt ?? null;
     if (!sendNow && sendAt !== null && sendAt > Date.now()) {
       continued.outcome = waitOn({ kind: "time" }, sendAt);
@@ -666,6 +685,7 @@ async function runDispatchAttempt(
   };
 
   if (!sendNow && hasMessageDispatchHooks()) {
+    assertPluginHoldNotStopPaused();
     const outcome = await runMessageDispatchHookPass(deps, {
       thread,
       threadResponse: toThreadResponseFromThread(deps, { thread }),
@@ -699,6 +719,7 @@ async function runDispatchAttempt(
       continueAfterHooks: continueThroughCoreWaits,
     });
     if (outcome.kind === "wait") {
+      assertPluginHoldNotStopPaused();
       if (claimed !== null) {
         noteDispatchRequeued(thread.id, outcome.waiter.pluginId);
       }
@@ -714,8 +735,14 @@ async function runDispatchAttempt(
         pluginId: outcome.waiter.pluginId,
         reason: dispatchWaitReasonForPass(outcome),
       };
+      const turnEndWait =
+        thread.status === "stopping"
+          ? "stopping"
+          : thread.status === "active" && attempt === "start-turn"
+            ? "thread-busy"
+            : null;
       return notBefore === null
-        ? waitOn(wait, outcome.waiter.sendAt)
+        ? waitOn(wait, outcome.waiter.sendAt, turnEndWait)
         : waitOn(
             { ...wait, notBefore },
             Math.max(notBefore, outcome.waiter.sendAt ?? notBefore),
@@ -794,7 +821,7 @@ async function runDispatchAttempt(
     );
   }
   if (claimed !== null) {
-    settleQueueRowDispatched({ row: claimed[0]! });
+    settleQueueRowsDispatched(claimed);
   }
   return { kind: "dispatched", messageSequence };
 }
@@ -875,7 +902,7 @@ interface AdmitPendingThreadArgs {
 }
 
 interface PendingThreadAdmission {
-  claimedRow: ClaimedQueuedThreadMessageRow | null;
+  claimed: ClaimedQueuedThreadMessageRow[] | null;
   messageSequence: number;
   startingThread: Thread;
 }
@@ -926,7 +953,6 @@ async function admitPendingThread(
   const execution = await buildExecutionOptions(deps, args.payload, {
     threadId: args.thread.id,
   });
-  const claimedRow = args.claimed?.[0] ?? null;
   let admitted: { messageSequence: number; startingThread: Thread };
   try {
     admitted = deps.db.transaction(
@@ -990,7 +1016,7 @@ async function admitPendingThread(
     buildThreadStatusChangeMetadata(deps, startingThread),
   );
   return {
-    claimedRow,
+    claimed: args.claimed,
     messageSequence,
     startingThread,
   };
@@ -1000,9 +1026,9 @@ async function launchAdmittedThread(
   deps: LoggedPendingInteractionWorkSessionDeps,
   admission: PendingThreadAdmission,
 ): Promise<void> {
-  const { claimedRow, startingThread } = admission;
-  if (claimedRow !== null) {
-    settleQueueRowDispatched({ row: claimedRow });
+  const { claimed, startingThread } = admission;
+  if (claimed !== null) {
+    settleQueueRowsDispatched(claimed);
   }
   scheduleThreadProvisioningAdvance(deps, startingThread.id);
 }

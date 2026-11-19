@@ -43,10 +43,11 @@ import type {
   QueuedMessageWaitingOnKind,
   StoredQueuedMessageWaitingOn,
 } from "@bb/domain";
-import type {
-  DbConnection,
-  DbQueryConnection,
-  DbTransaction,
+import {
+  afterCommit,
+  type DbConnection,
+  type DbQueryConnection,
+  type DbTransaction,
 } from "../connection.js";
 import type { DbNotifier } from "../notifier.js";
 import {
@@ -472,22 +473,22 @@ const IDLE_DRAINABLE_WAIT_KINDS = [
   "stopping",
 ] as const;
 
-function hasOrdinaryTurnEndWait(row: QueuedThreadMessageRow): boolean {
-  if (row.waitingOn === null) return true;
-  try {
-    const parsed = JSON.parse(row.waitingOn) as { kind?: unknown };
-    return ORDINARY_TURN_END_WAIT_KINDS.some(
-      (waitKind) => waitKind === parsed.kind,
-    );
-  } catch {
-    return false;
-  }
-}
-
 export function isOrdinaryTurnEndQueuedMessage(
   row: QueuedThreadMessageRow,
+  effectiveWaitKind?: QueuedMessageWaitingOnKind,
 ): boolean {
-  return row.systemNotice === null && hasOrdinaryTurnEndWait(row);
+  if (row.systemNotice !== null) return false;
+  let kind: unknown = effectiveWaitKind;
+  if (kind === undefined) {
+    if (row.waitingOn === null) return true;
+    try {
+      const parsed = JSON.parse(row.waitingOn) as { kind?: unknown };
+      kind = parsed.kind;
+    } catch {
+      return false;
+    }
+  }
+  return ORDINARY_TURN_END_WAIT_KINDS.some((waitKind) => waitKind === kind);
 }
 
 /**
@@ -1822,6 +1823,7 @@ export interface RequeueClaimedQueuedThreadMessagesArgs {
   threadId: string;
   waitingOn: StoredQueuedMessageWaitingOn;
   sendAt: number | null;
+  onRequeued?: (rows: readonly QueuedThreadMessageRow[]) => void;
 }
 
 export function requeueClaimedQueuedThreadMessages(
@@ -1836,10 +1838,11 @@ export function requeueClaimedQueuedThreadMessages(
     sendAt: args.sendAt,
     waitingOn: args.waitingOn,
   };
-  const queued = db.transaction(
+  const { queuedLead, updatedRows } = db.transaction(
     (tx) => {
       const now = Date.now();
       let queuedLead: QueuedThreadMessageRow | null = null;
+      const updatedRows: QueuedThreadMessageRow[] = [];
       for (const claim of args.claims) {
         const row = getQueuedThreadMessage(tx, claim.id);
         if (!row || row.threadId !== args.threadId) continue;
@@ -1847,16 +1850,18 @@ export function requeueClaimedQueuedThreadMessages(
         if (!ownsClaim && (claim !== lead || isQueuedThreadMessageClaimed(row)))
           continue;
         const updated = transitionQueuedMessage(tx, { now, row, transition });
+        if (updated !== null) updatedRows.push(updated);
         if (claim === lead) queuedLead = updated;
       }
-      return queuedLead;
+      return { queuedLead, updatedRows };
     },
     { behavior: "immediate" },
   );
-  if (queued) {
+  afterCommit(db, () => args.onRequeued?.(updatedRows));
+  if (queuedLead) {
     notifier.notifyThread(args.threadId, ["queue-changed"]);
   }
-  return queued;
+  return queuedLead;
 }
 
 export function releaseQueuedMessageClaim(

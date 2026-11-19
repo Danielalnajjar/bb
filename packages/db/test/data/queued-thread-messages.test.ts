@@ -1107,6 +1107,44 @@ describe("queued thread messages", () => {
     ).toEqual([lead.id, tail.id]);
   });
 
+  it("reports only the rows whose waits were actually replaced on requeue", () => {
+    const { db, thread } = setup();
+    const lead = queueTurnEndMessage(db, thread.id, defaultInput);
+    const tail = queueTurnEndMessage(db, thread.id, altInput);
+    setQueuedThreadMessageGroupBoundary({
+      db,
+      notifier: noopNotifier,
+      threadId: thread.id,
+      expectedGroupedPrefixQueuedMessageIds: [lead.id, tail.id],
+      groupBoundaryQueuedMessageId: tail.id,
+    });
+    const claimed = claimNextQueuedThreadMessageGroup(
+      db,
+      noopNotifier,
+      thread.id,
+      () => true,
+    );
+    expect(claimed?.map((row) => row.id)).toEqual([lead.id, tail.id]);
+    releaseQueuedMessageClaim(db, noopNotifier, {
+      id: tail.id,
+      claimToken: claimed![1]!.claimToken,
+    });
+    const tailBefore = getQueuedThreadMessage(db, tail.id);
+    const onRequeued = vi.fn();
+
+    const result = requeueClaimedQueuedThreadMessages(db, noopNotifier, {
+      claims: claimed!.map(({ id, claimToken }) => ({ id, claimToken })),
+      threadId: thread.id,
+      waitingOn: { kind: "plugin", pluginId: "limits", reason: "At capacity" },
+      sendAt: null,
+      onRequeued,
+    });
+
+    expect(result).toMatchObject({ id: lead.id, waitHolder: "plugin:limits" });
+    expect(onRequeued).toHaveBeenCalledExactlyOnceWith([result]);
+    expect(getQueuedThreadMessage(db, tail.id)).toEqual(tailBefore);
+  });
+
   it("claims only the selected message when sending outside the lead group", () => {
     const { db, thread } = setup();
     const firstQueuedMessage = createQueuedThreadMessage(db, noopNotifier, {

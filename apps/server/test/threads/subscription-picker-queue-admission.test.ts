@@ -249,11 +249,11 @@ async function observeIdleReoffer(reloadWhileBusy: boolean) {
   });
 }
 
-it.fails("skills#1536 reoffers the original prompt on natural idle", async () => {
+it("skills#1536 reoffers the original prompt on natural idle", async () => {
   await observeIdleReoffer(false);
 });
 
-it.fails("skills#1536 reoffers on natural idle after a picker reload while still busy", async () => {
+it("skills#1536 reoffers on natural idle after a picker reload while still busy", async () => {
   await observeIdleReoffer(true);
 });
 
@@ -291,7 +291,7 @@ it("reoffers the original row once when the picker reloads after idle and waits 
   });
 });
 
-it.fails("skills#1536 keeps a busy-held next-turn prompt paused by Stop through a plugin wake", async () => {
+it("skills#1536 keeps a busy-held next-turn prompt paused by Stop through a plugin wake", async () => {
   await withTestHarness(async (harness) => {
     const fixture = await queueWhileBusy(harness);
     const response = harness.app.request(

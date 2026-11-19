@@ -30,7 +30,10 @@ import {
   isPluginDispatchRequeuedRecently,
 } from "./dispatch-hooks.js";
 import { recordQueuedMessageDrainFailure } from "./queue-drain-failure.js";
-import { clearQueuedMessageWait } from "./queue-waits.js";
+import {
+  clearQueuedMessageWait,
+  releaseTurnEndPluginHolds,
+} from "./queue-waits.js";
 import { defineItemSweep, type ItemSweep } from "../system/item-sweep.js";
 import {
   createAutomaticQueuedMessageGroupEligibility,
@@ -335,6 +338,7 @@ async function runThreadReadyDispatch(
     await deps.lifecycleDedupers.queuedMessageDispatch.run(
       threadId,
       async () => {
+        releaseTurnEndPluginHolds(deps, threadId);
         await sendNextQueuedMessageIfPresent(deps, { threadId });
       },
     );

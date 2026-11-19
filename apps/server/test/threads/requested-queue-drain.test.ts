@@ -1,11 +1,15 @@
 import {
   claimNextQueuedThreadMessageGroup,
   createQueuedThreadMessage,
+  getQueuedThreadMessage,
+  getThread,
+  isThreadQueueAutoSendPaused,
   listQueuedThreadMessages,
   setQueuedThreadMessageFailureReason,
   setQueuedThreadMessageGroupBoundary,
 } from "@bb/db";
 import { turnRequestEventDataSchema } from "@bb/domain";
+import { createDeferredPromise } from "@bb/test-helpers";
 import type { PluginHookName } from "@get-bb/plugin-sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -1065,6 +1069,256 @@ describe("a targeted attempt that holds its claim while the turn completes", () 
           JSON.parse(row.content),
         ),
       ).toEqual([textInput("scheduled")]);
+    });
+  });
+});
+
+describe("plugin holds recorded while a turn is active", () => {
+  it.each(["completion", "Stop"] as const)(
+    "handles a busy hook that returns its wait after the %s wake",
+    async (finish) => {
+      await withTestHarness(async (harness) => {
+        vi.useFakeTimers({ toFake: ["setImmediate", "clearImmediate"] });
+        const { thread } = seedRunnableThread(harness, {
+          hostId: `host-late-busy-hold-${finish}`,
+          status: "active",
+        });
+        const input = textInput("original busy follow-up");
+        const turnsBefore = turnRequests(harness, thread.id).length;
+        const entered = createDeferredPromise<void>();
+        const release = createDeferredPromise<void>();
+        installHooks({
+          "message.dispatch": [
+            {
+              pluginId: "limiter",
+              handler: async (context) => {
+                if (context.thread.status !== "active")
+                  return { action: "proceed" };
+                entered.resolve();
+                await release.promise;
+                return { action: "wait", reason: "At capacity" };
+              },
+            },
+          ],
+        });
+        const submission = acceptThreadSendRequest(harness.deps, {
+          thread,
+          payload: { input, mode: "queue-if-active" },
+        });
+        try {
+          await Promise.race([
+            entered.promise,
+            submission.then(() => {
+              throw new Error("The busy hook did not block the submission");
+            }),
+          ]);
+          if (finish === "Stop") {
+            await stopThread(harness, thread.id);
+          } else {
+            expect(
+              moveThreadStatus(harness.deps, {
+                move: "run.succeeded",
+                threadId: thread.id,
+              }).applied,
+            ).toBe(true);
+            await runQueuedMessageDispatch(harness.deps, {
+              kind: "thread-ready",
+              threadId: thread.id,
+            });
+          }
+          await vi.runAllTimersAsync();
+          expect(getThread(harness.db, thread.id)?.status).toBe("idle");
+          expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([]);
+          expect(turnRequests(harness, thread.id)).toHaveLength(turnsBefore);
+
+          const readyDrain = vi.spyOn(
+            harness.deps.lifecycleDedupers.queuedMessageDispatch,
+            "run",
+          );
+          try {
+            release.resolve();
+            expect(await submission).toMatchObject({ delivery: "queued" });
+            await vi.runAllTimersAsync();
+            expect(readyDrain).toHaveBeenCalledWith(
+              thread.id,
+              expect.any(Function),
+            );
+            await readyDrain.mock.results[0]?.value;
+          } finally {
+            readyDrain.mockRestore();
+          }
+
+          const followUps = turnRequests(harness, thread.id)
+            .slice(turnsBefore)
+            .map(
+              (event) =>
+                turnRequestEventDataSchema.parse(JSON.parse(event.data)).input,
+            );
+          const remaining = listQueuedThreadMessages(harness.db, thread.id);
+          if (finish === "Stop") {
+            expect(followUps).toEqual([]);
+            expect(remaining).toMatchObject([
+              {
+                state: "waiting",
+                waitingOn: '{"kind":"thread-busy"}',
+                claimToken: null,
+              },
+            ]);
+            expect(isThreadQueueAutoSendPaused(harness.db, thread.id)).toBe(
+              true,
+            );
+          } else {
+            expect(followUps).toEqual([input]);
+            expect(remaining).toEqual([]);
+          }
+        } finally {
+          release.resolve();
+          await Promise.allSettled([submission]);
+          await vi.runAllTimersAsync();
+        }
+      });
+    },
+  );
+
+  it.each(["plugin-recheck", "time-reached"] as const)(
+    "blocks a %s wake after Stop settles but before the thread-ready wake runs",
+    async (wake) => {
+      await withTestHarness(async (harness) => {
+        vi.useFakeTimers({ toFake: ["setImmediate", "clearImmediate"] });
+        const { thread } = seedRunnableThread(harness, {
+          hostId: `host-stop-before-conversion-${wake}`,
+          status: "active",
+        });
+        const now = Date.now();
+        let offers = 0;
+        installHooks({
+          "message.dispatch": [
+            {
+              pluginId: "limiter",
+              handler: () => {
+                offers += 1;
+                if (offers > 1) return { action: "proceed" };
+                return {
+                  action: "wait",
+                  reason: "At capacity",
+                  ...(wake === "time-reached" ? { sendAt: now } : {}),
+                };
+              },
+            },
+          ],
+        });
+        const turnsBefore = turnRequests(harness, thread.id).length;
+        await acceptThreadSendRequest(harness.deps, {
+          thread,
+          payload: {
+            input: textInput("parked before Stop"),
+            mode: "queue-if-active",
+          },
+        });
+        const [row] = listQueuedThreadMessages(harness.db, thread.id);
+        expect(row?.waitHolder).toBe("plugin:limiter");
+        if (!row) throw new Error("Missing marked row");
+
+        try {
+          await stopThread(harness, thread.id);
+          expect(getThread(harness.db, thread.id)?.status).toBe("idle");
+          expect(isThreadQueueAutoSendPaused(harness.db, thread.id)).toBe(true);
+          expect(getQueuedThreadMessage(harness.db, row.id)?.waitingOn).toBe(
+            row.waitingOn,
+          );
+
+          if (wake === "plugin-recheck") {
+            await runPluginWake(harness);
+          } else {
+            await runTimeWake(harness, now);
+          }
+          expect(offers).toBe(1);
+          expect(turnRequests(harness, thread.id)).toHaveLength(turnsBefore);
+          expect(getQueuedThreadMessage(harness.db, row.id)).toMatchObject({
+            state: "waiting",
+            waitingOn: '{"kind":"thread-busy"}',
+            claimToken: null,
+            sendAt: null,
+          });
+        } finally {
+          await vi.runAllTimersAsync();
+        }
+      });
+    },
+  );
+
+  it("returns a claimed busy hold to the Stop pause when its hook proceeds late", async () => {
+    await withTestHarness(async (harness) => {
+      vi.useFakeTimers({ toFake: ["setImmediate", "clearImmediate"] });
+      const { thread } = seedRunnableThread(harness, {
+        hostId: "host-stop-during-recheck",
+        status: "active",
+      });
+      const entered = createDeferredPromise<void>();
+      const release = createDeferredPromise<void>();
+      installHooks({
+        "message.dispatch": [
+          {
+            pluginId: "limiter",
+            handler: async (context) => {
+              if (context.queuedMessages.length === 0) {
+                return { action: "wait", reason: "At capacity" };
+              }
+              entered.resolve();
+              await release.promise;
+              return { action: "proceed" };
+            },
+          },
+        ],
+      });
+      const turnsBefore = turnRequests(harness, thread.id).length;
+      await acceptThreadSendRequest(harness.deps, {
+        thread,
+        payload: {
+          input: textInput("claimed before Stop"),
+          mode: "queue-if-active",
+        },
+      });
+      const [row] = listQueuedThreadMessages(harness.db, thread.id);
+      expect(row?.waitHolder).toBe("plugin:limiter");
+      if (!row) throw new Error("Missing marked row");
+      const recheck = runPluginWake(harness);
+      try {
+        await Promise.race([
+          entered.promise,
+          recheck.then(() => {
+            throw new Error("The recheck did not reach its deferred hook");
+          }),
+        ]);
+        expect(getQueuedThreadMessage(harness.db, row.id)).toMatchObject({
+          state: "claimed",
+          claimToken: expect.any(String),
+        });
+        await stopThread(harness, thread.id);
+        await vi.runAllTimersAsync();
+        expect(getThread(harness.db, thread.id)?.status).toBe("idle");
+        expect(isThreadQueueAutoSendPaused(harness.db, thread.id)).toBe(true);
+        expect(getQueuedThreadMessage(harness.db, row.id)).toMatchObject({
+          state: "claimed",
+          waitingOn: row.waitingOn,
+        });
+
+        release.resolve();
+        await recheck;
+
+        expect(turnRequests(harness, thread.id)).toHaveLength(turnsBefore);
+        expect(getQueuedThreadMessage(harness.db, row.id)).toMatchObject({
+          state: "waiting",
+          waitingOn: '{"kind":"thread-busy"}',
+          claimToken: null,
+          claimedAt: null,
+        });
+        expect(isThreadQueueAutoSendPaused(harness.db, thread.id)).toBe(true);
+      } finally {
+        release.resolve();
+        await Promise.allSettled([recheck]);
+        await vi.runAllTimersAsync();
+      }
     });
   });
 });
