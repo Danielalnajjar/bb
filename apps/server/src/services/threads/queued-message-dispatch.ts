@@ -5,6 +5,7 @@ import { waitForMachineMaintenance } from "../machines/provider-orchestration.js
 import {
   getQueuedThreadMessage,
   getThread,
+  getUndatedPluginHeldRestartResume,
   listDueScheduledQueuedThreadMessages,
   listIdleThreadsWithQueuedMessages,
   listReadySystemNoticesOnBusyThreads,
@@ -56,6 +57,7 @@ export type QueuedMessageDispatchWake =
   | { kind: "host-connected"; hostId: string }
   | { kind: "app-update-released" }
   | { kind: "time-reached"; now: number }
+  | { kind: "restart-resume-released"; threadId: string }
   | { kind: "plugin-recheck" }
   | { kind: "plugin-unregistered"; pluginId: string }
   | { kind: "idle-recovery"; now: number }
@@ -127,6 +129,7 @@ function dispatchWakeContext(
     case "thread-ready":
     case "turn-started":
     case "interaction-settled":
+    case "restart-resume-released":
       return { threadId: wake.threadId, wake: wake.kind };
     case "edit-released":
       return {
@@ -317,6 +320,24 @@ async function executePreparedQueuedMessageDispatch(
     case "time-reached":
       await dueScheduledQueueSweep(deps, wake.now).run(deps, wake.now);
       return;
+    case "restart-resume-released": {
+      const now = Date.now();
+      const dueRows = listDueScheduledQueuedThreadMessages(
+        deps.db,
+        now,
+        wake.threadId,
+      );
+      const row = getUndatedPluginHeldRestartResume(deps.db, wake.threadId);
+      if (row !== undefined) await attemptQueuedMessageNow(deps, row);
+      for (const due of dueRows) {
+        await attemptAutomaticQueuedMessage(deps, due, {
+          now,
+          respectRequeuePacing: true,
+          retryingFailure: false,
+        });
+      }
+      return;
+    }
     case "idle-recovery":
       releaseStaleQueuedMessageDispatchClaims(deps, wake.now);
       await idleThreadQueueSweep(deps).run(deps, wake.now);

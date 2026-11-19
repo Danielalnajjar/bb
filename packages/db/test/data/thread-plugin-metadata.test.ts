@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
+import { RESTART_RESUME_METADATA_KEY, type JsonValue } from "@bb/domain";
 import { createConnection, migrate } from "../../src/index.js";
 import { threadPluginMetadata } from "../../src/schema.js";
 import { withWriteAfterFirstRead } from "../helpers/interleave.js";
@@ -16,6 +17,7 @@ import {
   insertThreadPluginMetadata,
   listThreadPluginMetadataRows,
   patchThreadPluginMetadata,
+  readRestartResumeFacts,
 } from "../../src/data/thread-plugin-metadata.js";
 import { noopNotifier } from "../../src/notifier.js";
 import { upsertHost } from "../../src/data/hosts.js";
@@ -35,6 +37,66 @@ function setup(name: string) {
 }
 
 describe("thread plugin metadata persistence", () => {
+  it("reads effective restart facts across namespaces without accepting invalid records", () => {
+    const { db, project } = setup("restart-facts");
+    const thread = createThread(db, noopNotifier, {
+      projectId: project.id,
+      providerId: "codex",
+    });
+    const otherThread = createThread(db, noopNotifier, {
+      projectId: project.id,
+      providerId: "codex",
+    });
+    const values: Record<string, JsonValue> = {
+      "receipt-plugin": { hold: false, receiptBacked: true },
+      "hold-plugin": { hold: true, reason: "Paused by the lead" },
+      "invalid-shape": { hold: "true", receiptBacked: true },
+      "invalid-reason": { hold: true, reason: "a".repeat(201) },
+      "invalid-null": null,
+    };
+    for (const [pluginId, value] of Object.entries(values)) {
+      insertThreadPluginMetadata(db, {
+        threadId: thread.id,
+        pluginId,
+        metadata: { [RESTART_RESUME_METADATA_KEY]: value },
+      });
+    }
+    insertThreadPluginMetadata(db, {
+      threadId: thread.id,
+      pluginId: "unrelated",
+      metadata: { otherKey: true },
+    });
+    insertThreadPluginMetadata(db, {
+      threadId: otherThread.id,
+      pluginId: "other-thread",
+      metadata: { [RESTART_RESUME_METADATA_KEY]: { hold: true } },
+    });
+    db.insert(threadPluginMetadata).values({
+      threadId: thread.id,
+      pluginId: "invalid-json",
+      metadataJson: "{ invalid",
+    }).run();
+    const invalid: string[] = [];
+    expect(readRestartResumeFacts(db, thread.id, (pluginId) => invalid.push(pluginId))).toEqual({
+      hold: { pluginId: "hold-plugin", reason: "Paused by the lead" },
+      receiptBacked: true,
+    });
+    expect(invalid.sort()).toEqual(["invalid-json", "invalid-null", "invalid-reason", "invalid-shape"]);
+    expect(db.transaction((tx) => {
+      patchThreadPluginMetadata(tx, {
+        threadId: thread.id,
+        pluginId: "hold-plugin",
+        set: {},
+        remove: [RESTART_RESUME_METADATA_KEY],
+      });
+      return readRestartResumeFacts(tx, thread.id);
+    })).toEqual({ hold: null, receiptBacked: true });
+    expect(readRestartResumeFacts(db, otherThread.id)).toEqual({
+      hold: { pluginId: "other-thread", reason: null },
+      receiptBacked: false,
+    });
+  });
+
   it("seeds one namespace and returns {} when absent", () => {
     const { db, project } = setup("seed");
     const thread = createThread(db, noopNotifier, {

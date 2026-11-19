@@ -14,6 +14,7 @@ import {
   isAppUpdateSendHoldSet,
   type EnvironmentRow,
   getThread,
+  isRestartResumeQueuedMessage,
   isThreadQueueAutoSendPaused,
   listRunningThreads,
   type ClaimedQueuedThreadMessageRow,
@@ -21,6 +22,7 @@ import {
 } from "@bb/db";
 import {
   createStandaloneBuiltinCompactCommandInput,
+  isRestartResumeRetry,
   promptInputSchema,
   type PromptInput,
   type QueuedMessagePayload,
@@ -58,10 +60,12 @@ import {
   type DispatchAttemptKind,
 } from "./dispatch-hooks.js";
 import {
+  assertRestartResumeNotHeld,
   createQueuedMessageAutoSendPausedError,
   createQueuedMessageClaimLostError,
   isOrdinaryTurnEndPluginHold,
   isTurnEndPluginHoldReady,
+  readLoggedRestartResumeFacts,
   recordQueuedMessageWait,
   settleQueueRowsDispatched,
   type QueuedDispatchMessage,
@@ -449,8 +453,22 @@ async function runDispatchAttempt(
   });
   const claimed = args.source.kind === "drain" ? args.source.claimed : null;
   const sendNow = args.source.kind === "drain" && args.source.sendNow;
+  const guardRestartResume =
+    !sendNow &&
+    (isRestartResumeRetry(args.queuePayload) ||
+      claimed?.some(isRestartResumeQueuedMessage) === true);
   const respectManualStopPause =
     args.source.kind === "drain" && args.source.respectManualStopPause;
+  const beforeAppendInTransaction: SendThreadMessageTransactionPreflight = ({
+    tx,
+  }) => {
+    if (guardRestartResume) {
+      assertRestartResumeNotHeld({ db: tx, logger: deps.logger }, thread.id);
+    }
+    if (claimed !== null) {
+      consumeClaimedRows(claimed, thread.id, respectManualStopPause)({ tx });
+    }
+  };
   const ordinaryPluginHold =
     respectManualStopPause && claimed?.some(isOrdinaryTurnEndPluginHold);
   const assertPluginHoldNotStopPaused = () => {
@@ -490,6 +508,9 @@ async function runDispatchAttempt(
     sendAt: number | null,
     turnEndWait: TurnEndPluginHoldKind | null = null,
   ): DispatchAttemptOutcome => {
+    if (guardRestartResume && claimed !== null) {
+      assertRestartResumeNotHeld(deps, thread.id);
+    }
     const entry = recordQueuedMessageWait(deps, {
       thread,
       message: queuedMessage,
@@ -546,7 +567,9 @@ async function runDispatchAttempt(
       !sendNow &&
       args.queuePayload.kind !== "retry" &&
       retriesGoFirst &&
-      hasLiveQueuedRetry(deps.db, thread.id)
+      hasLiveQueuedRetry(deps.db, thread.id) &&
+      (readLoggedRestartResumeFacts(deps, thread.id).hold === null ||
+        hasLiveQueuedRetry(deps.db, thread.id, { ignoreRestartResume: true }))
     ) {
       continued.outcome = waitOn({ kind: "thread-busy" }, null);
       return;
@@ -631,6 +654,9 @@ async function runDispatchAttempt(
       resolveDispatchAttemptKind(currentThread, payload.mode) === "join-turn" &&
       getActiveTurnId(deps, thread.id) === null
     ) {
+      if (guardRestartResume) {
+        assertRestartResumeNotHeld(deps, thread.id);
+      }
       const outcome = queueInputForStartingTurn(deps, {
         claimed,
         input: queuedMessage,
@@ -660,6 +686,7 @@ async function runDispatchAttempt(
     if (firstDispatch) {
       admitted.value = await admitPendingThread(deps, {
         author,
+        beforeAppendInTransaction,
         claimed,
         originPluginId: args.originPluginId,
         payload:
@@ -672,7 +699,6 @@ async function runDispatchAttempt(
                   senderThreadId,
                 }),
               },
-        respectManualStopPause,
         retryOf: args.retryOf,
         startContext: args.startContext ?? retryStartContext,
         thread,
@@ -684,6 +710,9 @@ async function runDispatchAttempt(
     }
   };
 
+  if (guardRestartResume) {
+    assertRestartResumeNotHeld(deps, thread.id);
+  }
   if (!sendNow && hasMessageDispatchHooks()) {
     assertPluginHoldNotStopPaused();
     const outcome = await runMessageDispatchHookPass(deps, {
@@ -720,9 +749,6 @@ async function runDispatchAttempt(
     });
     if (outcome.kind === "wait") {
       assertPluginHoldNotStopPaused();
-      if (claimed !== null) {
-        noteDispatchRequeued(thread.id, outcome.waiter.pluginId);
-      }
       const callerSendAt = payload.sendAt ?? null;
       const notBefore =
         args.queuePayload.kind === "retry" &&
@@ -741,12 +767,17 @@ async function runDispatchAttempt(
           : thread.status === "active" && attempt === "start-turn"
             ? "thread-busy"
             : null;
-      return notBefore === null
-        ? waitOn(wait, outcome.waiter.sendAt, turnEndWait)
-        : waitOn(
-            { ...wait, notBefore },
-            Math.max(notBefore, outcome.waiter.sendAt ?? notBefore),
-          );
+      const queued =
+        notBefore === null
+          ? waitOn(wait, outcome.waiter.sendAt, turnEndWait)
+          : waitOn(
+              { ...wait, notBefore },
+              Math.max(notBefore, outcome.waiter.sendAt ?? notBefore),
+            );
+      if (claimed !== null && queued.kind === "queued") {
+        noteDispatchRequeued(thread.id, outcome.waiter.pluginId);
+      }
+      return queued;
     }
   } else {
     await continueThroughCoreWaits();
@@ -799,13 +830,7 @@ async function runDispatchAttempt(
         if (getThread(tx, thread.id)?.status !== thread.status) {
           throw new DispatchThreadStatusChangedError();
         }
-        if (claimed !== null) {
-          consumeClaimedRows(
-            claimed,
-            thread.id,
-            respectManualStopPause,
-          )({ tx });
-        }
+        beforeAppendInTransaction({ tx });
       },
     });
   } catch (error) {
@@ -891,10 +916,10 @@ function consumeClaimedRows(
 
 interface AdmitPendingThreadArgs {
   author: DispatchAuthor;
+  beforeAppendInTransaction: SendThreadMessageTransactionPreflight;
   claimed: ClaimedQueuedThreadMessageRow[] | null;
   originPluginId: string | null;
   payload: SendMessageRequest & { inputGroups?: PromptInput[][] };
-  respectManualStopPause: boolean;
   retryOf: TurnRequestRetryMarker | undefined;
   /** Creation's own record; null on a re-attempt, which reads it back. */
   startContext: PendingThreadStartContext | null;
@@ -961,13 +986,7 @@ async function admitPendingThread(
         // flip that loses to a concurrent attempt rolls the consumption back,
         // so the row stays claimed for the caller to hand back rather than
         // being deleted under a message that never dispatched.
-        if (args.claimed !== null && args.claimed.length > 0) {
-          consumeClaimedRows(
-            args.claimed,
-            args.thread.id,
-            args.respectManualStopPause,
-          )({ tx });
-        }
+        args.beforeAppendInTransaction({ tx });
         const prepared = runThreadLifecycleInTransaction(
           { db: tx, hub: deps.hub, logger: deps.logger },
           args.thread.id,

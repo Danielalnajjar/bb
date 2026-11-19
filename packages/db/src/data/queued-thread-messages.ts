@@ -23,6 +23,7 @@ import {
   QUEUED_MESSAGE_AUTOMATICALLY_DRAINABLE_STATES,
   QUEUED_MESSAGE_FAILED_STATES,
   QUEUED_MESSAGE_PLUGIN_WAIT_HOLDER_PREFIX,
+  RESTART_RESUME_RETRY_REASON,
   evaluateQueuedMessageTransition,
   isQueuedMessageFailedState,
   projectAttachmentPaths,
@@ -63,6 +64,7 @@ import {
 import { createOrderKeyAfter, createOrderKeyBetween } from "./order-keys.js";
 import { queryInSqliteVariableBatches } from "./sqlite-variable-batches.js";
 import { liveThread } from "./threads.js";
+import { readRestartResumeFacts } from "./thread-plugin-metadata.js";
 
 export interface CreateQueuedThreadMessageInput {
   threadId: string;
@@ -126,6 +128,14 @@ export interface UpdateQueuedThreadMessageInput {
 }
 
 export type QueuedThreadMessageRow = typeof queuedThreadMessages.$inferSelect;
+
+export function isRestartResumeQueuedMessage(
+  row: Pick<QueuedThreadMessageRow, "payloadKind" | "retryReason">,
+): boolean {
+  return (
+    row.payloadKind === "retry" && row.retryReason === RESTART_RESUME_RETRY_REASON
+  );
+}
 
 export interface ClaimedQueuedThreadMessageRow extends QueuedThreadMessageRow {
   claimedAt: number;
@@ -1502,17 +1512,23 @@ export type QueuedThreadMessageGroupClaimPolicy =
   | { kind: "explicit-send" };
 
 function isAutomaticQueuedThreadMessageGroupClaimAllowed(
+  tx: DbTransaction,
   rows: readonly QueuedThreadMessageRow[],
   pauseOrdinaryMessages: boolean,
   retryingFailure: boolean,
   now: number,
+  onInvalidRestartResumeMetadata?: (pluginId: string) => void,
 ): boolean {
+  const restart = rows.find(isRestartResumeQueuedMessage);
   return (
     !isQueuedThreadMessageGroupEditHeld(rows, now) &&
     (retryingFailure ||
       rows.every((row) => !isQueuedMessageFailedState(row.state))) &&
     (!pauseOrdinaryMessages ||
-      rows.every((row) => !isOrdinaryTurnEndQueuedMessage(row)))
+      rows.every((row) => !isOrdinaryTurnEndQueuedMessage(row))) &&
+    (restart === undefined ||
+      readRestartResumeFacts(tx, restart.threadId, onInvalidRestartResumeMetadata)
+        .hold === null)
   );
 }
 
@@ -1521,6 +1537,7 @@ export function claimQueuedThreadMessageGroup(
   notifier: DbNotifier,
   id: string,
   policy: QueuedThreadMessageGroupClaimPolicy,
+  onInvalidRestartResumeMetadata?: (pluginId: string) => void,
 ): ClaimedQueuedThreadMessageRow[] | null {
   const claimedQueuedMessages = db.transaction(
     (tx) => {
@@ -1546,10 +1563,12 @@ export function claimQueuedThreadMessageGroup(
       if (
         (policy.kind === "automatic" &&
           !isAutomaticQueuedThreadMessageGroupClaimAllowed(
+            tx,
             group,
             isThreadQueueAutoSendPaused(tx, existing.threadId),
             policy.retryingFailure,
             Date.now(),
+            onInvalidRestartResumeMetadata,
           )) ||
         (policy.kind === "automatic" && !policy.isGroupEligible(group))
       ) {
@@ -1579,6 +1598,7 @@ export function claimNextQueuedThreadMessageGroup(
   notifier: DbNotifier,
   threadId: string,
   isGroupEligible: QueuedThreadMessageGroupEligibility,
+  onInvalidRestartResumeMetadata?: (pluginId: string) => void,
 ): ClaimedQueuedThreadMessageRow[] | null {
   const claimedQueuedMessages = db.transaction(
     (tx) => {
@@ -1608,10 +1628,12 @@ export function claimNextQueuedThreadMessageGroup(
             (rows) =>
               isGroupEligible(rows) &&
               isAutomaticQueuedThreadMessageGroupClaimAllowed(
+                tx,
                 rows,
                 pauseOrdinaryMessages,
                 false,
                 now,
+                onInvalidRestartResumeMetadata,
               ),
           ) ?? null;
       if (group === null) {
@@ -2375,6 +2397,7 @@ export function clearQueuedThreadMessageWaitingOn(
 export function listDueScheduledQueuedThreadMessages(
   db: DbQueryConnection,
   now: number,
+  threadId?: string,
 ): QueuedThreadMessageRow[] {
   return db
     .select()
@@ -2383,6 +2406,9 @@ export function listDueScheduledQueuedThreadMessages(
       and(
         eq(queuedThreadMessages.state, "scheduled"),
         lte(queuedThreadMessages.sendAt, now),
+        threadId === undefined
+          ? undefined
+          : eq(queuedThreadMessages.threadId, threadId),
         exists(
           db
             .select({ live: sql`1` })
@@ -2544,6 +2570,7 @@ export function hasQueuedRetryOfTurnRequest(
 export function hasLiveQueuedRetry(
   db: DbQueryConnection,
   threadId: string,
+  opts?: { ignoreRestartResume?: boolean },
 ): boolean {
   return (
     db
@@ -2553,6 +2580,9 @@ export function hasLiveQueuedRetry(
         and(
           eq(queuedThreadMessages.threadId, threadId),
           eq(queuedThreadMessages.payloadKind, "retry"),
+          opts?.ignoreRestartResume
+            ? sql`${queuedThreadMessages.retryReason} is not ${RESTART_RESUME_RETRY_REASON}`
+            : undefined,
           ne(queuedThreadMessages.state, "failed_exhausted"),
           notSupersededQueuedThreadMessage(),
         ),
@@ -2560,6 +2590,31 @@ export function hasLiveQueuedRetry(
       .limit(1)
       .get() !== undefined
   );
+}
+
+export function getUndatedPluginHeldRestartResume(
+  db: DbQueryConnection,
+  threadId: string,
+): { threadId: string; id: string } | undefined {
+  return db
+    .select({
+      id: queuedThreadMessages.id,
+      threadId: queuedThreadMessages.threadId,
+    })
+    .from(queuedThreadMessages)
+    .where(
+      and(
+        eq(queuedThreadMessages.threadId, threadId),
+        eq(queuedThreadMessages.payloadKind, "retry"),
+        eq(queuedThreadMessages.retryReason, RESTART_RESUME_RETRY_REASON),
+        eq(queuedThreadMessages.state, "waiting"),
+        isNotNull(queuedThreadMessages.waitHolder),
+        isNull(queuedThreadMessages.sendAt),
+      ),
+    )
+    .orderBy(asc(queuedThreadMessages.sortKey), asc(queuedThreadMessages.id))
+    .limit(1)
+    .get();
 }
 
 export function moveQueuedThreadMessageToFrontInTransaction(

@@ -498,6 +498,12 @@ Resume interrupted threads after a restart is available in Settings → General 
   attempt 4 (three restarts in a row). A child thread that resumes does not notify its parent
   that it was interrupted; the parent hears when the child finishes.
   `bb thread wait` keeps waiting on a thread whose resume is queued.
+
+  A plugin can hold a thread's automatic restart resume. If the hold is already
+  in place, bb does not queue a continuation. If it starts after a continuation
+  was queued, the retry stays queued without changing its schedule. Clearing the
+  last hold makes the retry eligible for automatic dispatch again; **Send now**
+  overrides the hold. This does not pause ordinary messages or retries.
   Updating bb counts as a restart, so threads that Update now (or
   `bb updates app apply --yes`) cuts resume after the update. With the
   setting on, the Update now dialog, the CLI prompt, and the

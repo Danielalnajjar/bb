@@ -58,8 +58,10 @@ import {
 import { attemptDispatch, threadTargetHostId } from "./dispatch-attempt.js";
 import {
   isOrdinaryTurnEndPluginHold,
+  logInvalidRestartResumeMetadata,
   QUEUED_MESSAGE_AUTO_SEND_PAUSED_CODE,
   QUEUED_MESSAGE_CLAIM_LOST_CODE,
+  QUEUED_MESSAGE_RESTART_RESUME_HELD_CODE,
   releaseTurnEndPluginHolds,
 } from "./queue-waits.js";
 import { recordQueuedMessageDrainFailure } from "./queue-drain-failure.js";
@@ -409,7 +411,7 @@ async function withActiveQueuedMessageClaims<T>(
 }
 
 function claimQueuedThreadMessageForSend(
-  deps: Pick<AppDeps, "db" | "hub">,
+  deps: Pick<AppDeps, "db" | "hub" | "logger">,
   args: SendQueuedMessageArgs,
 ): ClaimedQueuedMessage[] {
   const existingQueuedMessage = getQueuedThreadMessage(
@@ -428,6 +430,8 @@ function claimQueuedThreadMessageForSend(
     deps.hub,
     args.queuedMessageId,
     args.claimPolicy,
+    (pluginId) =>
+      logInvalidRestartResumeMetadata(deps.logger, args.threadId, pluginId),
   );
   if (claimedQueuedMessages) {
     return claimedQueuedMessages;
@@ -459,6 +463,13 @@ function isQueuedMessageAutoSendPausedError(error: unknown): boolean {
   return (
     error instanceof ApiError &&
     error.body.code === QUEUED_MESSAGE_AUTO_SEND_PAUSED_CODE
+  );
+}
+
+function isQueuedRestartResumeHeldError(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.body.code === QUEUED_MESSAGE_RESTART_RESUME_HELD_CODE
   );
 }
 
@@ -652,7 +663,10 @@ async function sendClaimedQueuedMessageGroup(
       releaseTurnEndPluginHolds(deps, args.threadId);
       return toThreadQueuedMessage(queuedMessages[0]!);
     }
-    if (error instanceof ThreadContextClearInProgressError) {
+    if (
+      isQueuedRestartResumeHeldError(error) ||
+      error instanceof ThreadContextClearInProgressError
+    ) {
       return toThreadQueuedMessage(queuedMessages[0]!);
     }
     throw error;
@@ -706,6 +720,8 @@ export async function sendNextQueuedMessageIfPresent(
       retryingFailure: false,
       thread: initialThread,
     }),
+    (pluginId) =>
+      logInvalidRestartResumeMetadata(deps.logger, args.threadId, pluginId),
   );
   if (!nextQueuedMessages) {
     return false;
@@ -737,6 +753,7 @@ export async function sendNextQueuedMessageIfPresent(
     }
     if (
       isQueuedMessageClaimLostError(error) ||
+      isQueuedRestartResumeHeldError(error) ||
       error instanceof ThreadContextClearInProgressError
     ) {
       return false;

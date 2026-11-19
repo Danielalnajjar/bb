@@ -66,6 +66,7 @@ import {
 import { getDatabaseMaintenanceActivity } from "../src/data/maintenance.js";
 import { replaceStoredProviderModelCatalog } from "../src/data/provider-model-catalogs.js";
 import { openSession } from "../src/data/sessions.js";
+import { readRestartResumeFacts } from "../src/data/thread-plugin-metadata.js";
 import {
   listDueScheduledQueuedThreadMessages,
   listRetryableFailedQueuedThreadMessages,
@@ -272,6 +273,21 @@ function expectNoThreadOnlyEventSeek(details: string): void {
 describe("slow query index plans", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("reads restart metadata with a thread-keyed namespace lookup", () => {
+    const { db, thread } = setup();
+    try {
+      const captured = captureStatements(db, () => {
+        readRestartResumeFacts(db, thread.id);
+      });
+      expect(captured).toHaveLength(1);
+      expect(queryPlanDetails({ db, ...captured[0]! })).toMatch(
+        /SEARCH thread_plugin_metadata USING INDEX \w+ \(thread_id=\?\)/u,
+      );
+    } finally {
+      db.$client.close();
+    }
   });
 
   it("checks spawn-agent history without reading unrelated event payloads", () => {

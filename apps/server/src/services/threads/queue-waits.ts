@@ -7,6 +7,7 @@ import {
   getThread,
   isOrdinaryTurnEndQueuedMessage,
   noopNotifier,
+  readRestartResumeFacts,
   requeueClaimedQueuedThreadMessages,
   setQueuedThreadMessageWaitingOn,
   type ClaimedQueuedThreadMessageRow,
@@ -15,6 +16,7 @@ import {
   type DbQueryConnection,
   type QueuedThreadMessageRow,
 } from "@bb/db";
+import { isRestartResumeRetry } from "@bb/domain";
 import type {
   PromptInput,
   QueuedMessageDeliveryMode,
@@ -42,6 +44,7 @@ import { assertThreadHostAcceptsWork } from "./thread-host-admission.js";
 type QueueWaitDeps = {
   db: DbQueryConnection;
   hub: DbNotifier & Partial<Pick<AppDeps["hub"], "onChangedMessage">>;
+  logger?: AppDeps["logger"];
 };
 
 export type TurnEndPluginHoldKind = "thread-busy" | "stopping";
@@ -164,6 +167,8 @@ export function releaseTurnEndPluginHolds(
 export const QUEUED_MESSAGE_CLAIM_LOST_CODE = "queued_message_claim_lost";
 export const QUEUED_MESSAGE_AUTO_SEND_PAUSED_CODE =
   "queued_message_auto_send_paused";
+export const QUEUED_MESSAGE_RESTART_RESUME_HELD_CODE =
+  "queued_message_restart_resume_held";
 
 export function createQueuedMessageClaimLostError(): ApiError {
   return new ApiError(
@@ -179,6 +184,43 @@ export function createQueuedMessageAutoSendPausedError(): ApiError {
     QUEUED_MESSAGE_AUTO_SEND_PAUSED_CODE,
     "Queued message auto-send was paused by a manual stop",
   );
+}
+
+export function createQueuedRestartResumeHeldError(): ApiError {
+  return new ApiError(
+    409,
+    QUEUED_MESSAGE_RESTART_RESUME_HELD_CODE,
+    "A plugin is holding this restart continuation",
+  );
+}
+
+export function logInvalidRestartResumeMetadata(
+  logger: AppDeps["logger"] | undefined,
+  threadId: string,
+  pluginId: string,
+): void {
+  logger?.warn(
+    { threadId, pluginId },
+    "Ignoring invalid restart resume metadata",
+  );
+}
+
+export function readLoggedRestartResumeFacts(
+  deps: Pick<QueueWaitDeps, "db" | "logger">,
+  threadId: string,
+): ReturnType<typeof readRestartResumeFacts> {
+  return readRestartResumeFacts(deps.db, threadId, (pluginId) =>
+    logInvalidRestartResumeMetadata(deps.logger, threadId, pluginId),
+  );
+}
+
+export function assertRestartResumeNotHeld(
+  deps: Pick<QueueWaitDeps, "db" | "logger">,
+  threadId: string,
+): void {
+  if (readLoggedRestartResumeFacts(deps, threadId).hold !== null) {
+    throw createQueuedRestartResumeHeldError();
+  }
 }
 
 /** The message a queued row will carry, as the queueing site supplies it. */
@@ -244,6 +286,12 @@ export function recordQueuedMessageWait(
   if (leadClaim === undefined) {
     row = deps.db.transaction(
       (tx) => {
+        if (isRestartResumeRetry(args.message.payload)) {
+          assertRestartResumeNotHeld(
+            { db: tx, logger: deps.logger },
+            args.thread.id,
+          );
+        }
         assertThreadHostAcceptsWork(tx, args.thread);
         const created = createQueuedThreadMessageInTransaction(tx, {
           threadId: args.thread.id,

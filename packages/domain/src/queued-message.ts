@@ -215,6 +215,12 @@ export type QueuedMessagePayload = z.infer<typeof queuedMessagePayloadSchema>;
 
 export const RESTART_RESUME_RETRY_REASON = "bb restarted";
 
+export function isRestartResumeRetry(payload: QueuedMessagePayload): boolean {
+  return (
+    payload.kind === "retry" && payload.reason === RESTART_RESUME_RETRY_REASON
+  );
+}
+
 /**
  * Core's own taxonomy for a queued row that is a SYSTEM notice rather than
  * someone's message — today, the "your child thread finished" notice a parent
