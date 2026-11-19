@@ -42,6 +42,7 @@ interface Entry {
   checkpoint: Checkpoint;
   historySequenceStart: number;
   dataVersion: number;
+  serverVersioned: boolean;
   generation: number;
   key: string;
   maxSeq: number;
@@ -225,6 +226,7 @@ export function projectConversationOutlineIncrementally(args: {
   db: DbConnection;
   threadId: string;
   key: string;
+  serverDataVersion?: number;
   maxSeq: number;
   historySequenceStart: number;
   orderingBoundarySequence: number | null;
@@ -243,7 +245,8 @@ export function projectConversationOutlineIncrementally(args: {
     cache = { entries: new Map(), chars: 0 };
     caches.set(args.db, cache);
   }
-  const dataVersion = getDatabaseDataVersion(args.db);
+  const serverVersioned = args.serverDataVersion !== undefined;
+  const dataVersion = args.serverDataVersion ?? getDatabaseDataVersion(args.db);
   const generation = getThreadEventRewriteGeneration(args.threadId);
   const entry = cache.entries.get(args.threadId);
   if (entry !== undefined) {
@@ -262,6 +265,7 @@ export function projectConversationOutlineIncrementally(args: {
     entry !== undefined &&
     entry.key === args.key &&
     entry.dataVersion === dataVersion &&
+    entry.serverVersioned === serverVersioned &&
     entry.generation === generation &&
     entry.historySequenceStart === args.historySequenceStart &&
     (args.orderingBoundarySequence === null ||
@@ -330,6 +334,7 @@ export function projectConversationOutlineIncrementally(args: {
         checkpoint: next,
         historySequenceStart: args.historySequenceStart,
         dataVersion,
+        serverVersioned,
         generation,
         key: args.key,
         maxSeq: args.maxSeq,

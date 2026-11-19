@@ -7,7 +7,6 @@ import {
   deleteThreadEventSuffixInTransaction,
   createThread,
   noopNotifier,
-  getLatestStoredConversationOutlineSequence,
   getLatestThreadSequence,
 } from "@bb/db";
 import {
@@ -206,9 +205,6 @@ function load(
     completedTurnDisplay,
     includeClearedContextHistory: false,
     maxSeq: getLatestThreadSequence(testThread.db, { threadId }),
-    outlineSequence: getLatestStoredConversationOutlineSequence(testThread.db, {
-      threadId,
-    }),
   });
 }
 
@@ -485,13 +481,15 @@ describe("incremental conversation outlines", () => {
           delta("live", "Live"),
         ]);
         expectMatchesFull(testThread, display);
-        for (const rows of [
-          [delta("live", " continued")],
-          [message("live", "Finished"), completed("live")],
-          backgroundTurn(100),
-          [started("next"), delta("next", "Next")],
-        ]) {
-          appendRows(testThread, rows);
+        for (const [status, rows] of [
+          ["active", [delta("live", " continued")]],
+          ["idle", [message("live", "Finished"), completed("live")]],
+          ["active", backgroundTurn(100)],
+          ["active", [started("next"), delta("next", "Next")]],
+          ["error", []],
+        ] as const) {
+          testThread.thread = { ...testThread.thread, status };
+          appendRows(testThread, [...rows]);
           const selected = countSelectedEventRows(testThread, () =>
             expectMatchesFull(testThread, display),
           );
@@ -526,7 +524,11 @@ describe("incremental conversation outlines", () => {
           backgroundTask(null, "late-task", update),
           delta("live", " after task"),
         ]);
-        expectMatchesFull(testThread);
+        const selected = countSelectedEventRows(testThread, () =>
+          expectMatchesFull(testThread),
+        );
+        if (update === "completed") expect(selected).toBeLessThan(25);
+        else expect(selected).toBeGreaterThan(100);
         appendRows(testThread, [message("live", "Done"), completed("live")]);
         expectMatchesFull(testThread);
       });

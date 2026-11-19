@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { threadStatusSchema, type Thread } from "@bb/domain";
-import { getLatestThreadSequence, type DbConnection } from "@bb/db";
+import {
+  getLatestThreadSequence,
+  hasThreadHistoryEditAfter,
+  type DbConnection,
+} from "@bb/db";
 import type { TimelinePaginationCursor } from "@bb/server-contract";
 import { ApiError } from "../../errors.js";
 import type { ThreadTimelinePageRequest } from "./timeline-pagination.js";
@@ -9,6 +13,7 @@ const snapshotSchema = z.object({
   version: z.literal(3),
   threadId: z.string(),
   maxSeq: z.number().int().nonnegative(),
+  observedHeadSeq: z.number().int().nonnegative().optional(),
   status: threadStatusSchema,
   surface: z.string(),
 });
@@ -41,12 +46,14 @@ export function resolveTimelineSnapshot(
   surface: string,
   requestedMaxSeq?: number,
 ): TimelineSnapshot {
+  const maxSeq = getLatestThreadSequence(db, { threadId: thread.id });
   if (page.kind === "latest") {
-    const maxSeq = getLatestThreadSequence(db, { threadId: thread.id });
+    const snapshotMaxSeq = Math.min(requestedMaxSeq ?? maxSeq, maxSeq);
     return {
       version: 3,
       threadId: thread.id,
-      maxSeq: Math.min(requestedMaxSeq ?? maxSeq, maxSeq),
+      maxSeq: snapshotMaxSeq,
+      ...(snapshotMaxSeq < maxSeq ? { observedHeadSeq: maxSeq } : {}),
       status: thread.status,
       surface,
     };
@@ -56,6 +63,7 @@ export function resolveTimelineSnapshot(
       throw new Error("Legacy cursor");
     const decoded = decodeTimelineCursor(page.beforeCursor.anchorId);
     const { snapshot } = decoded;
+    const observedHeadSeq = snapshot.observedHeadSeq ?? snapshot.maxSeq;
     if (
       decoded.anchorSeq !== page.beforeCursor.anchorSeq ||
       decoded.anchorSeq > snapshot.maxSeq ||
@@ -64,7 +72,17 @@ export function resolveTimelineSnapshot(
           decoded.content.beforeSequence <= decoded.anchorSeq))
     )
       throw new Error("Cursor sequence mismatch");
-    if (snapshot.threadId !== thread.id || snapshot.surface !== surface) {
+    if (
+      snapshot.threadId !== thread.id ||
+      snapshot.surface !== surface ||
+      snapshot.maxSeq > maxSeq ||
+      (maxSeq > observedHeadSeq &&
+        hasThreadHistoryEditAfter(db, {
+          threadId: thread.id,
+          afterSequence: observedHeadSeq,
+          cutoffAtOrBeforeSequence: snapshot.maxSeq,
+        }))
+    ) {
       throw new Error("Stale snapshot");
     }
     return snapshot;

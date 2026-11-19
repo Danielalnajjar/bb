@@ -22,6 +22,13 @@ export interface ThreadDerivedCacheRead<T> {
 }
 
 export interface ThreadDerivedCache<T> {
+  get(slot: string, revision: string): T | undefined;
+  store(
+    slot: string,
+    revision: string,
+    threadId: string,
+    built: ThreadDerivedCacheBuild<T>,
+  ): void;
   getOrBuild(read: ThreadDerivedCacheRead<T>): T;
   invalidateThread(threadId: string): void;
   readonly size: number;
@@ -61,32 +68,48 @@ export function createThreadDerivedCache<T>(
     totalBytes += entry.bytes;
   }
 
+  function getFreshEntry(slot: string, revision: string): Entry<T> | undefined {
+    const entry = entries.get(slot);
+    if (
+      entry === undefined ||
+      entry.revision !== revision ||
+      (entry.expiresAt !== null && Date.now() >= entry.expiresAt)
+    ) {
+      return undefined;
+    }
+    deleteEntry(slot);
+    insert(slot, entry);
+    return entry;
+  }
+
+  function store(
+    slot: string,
+    revision: string,
+    threadId: string,
+    { expiresAt, value }: ThreadDerivedCacheBuild<T>,
+  ): void {
+    deleteEntry(slot);
+    const bytes = budget === null ? 0 : budget.measure(value);
+    if (bytes > maxEntryBytes) return;
+    insert(slot, { bytes, expiresAt, revision, threadId, value });
+    while (entries.size > options.maxEntries || totalBytes > maxBytes) {
+      const oldest = entries.keys().next().value;
+      if (oldest === undefined) break;
+      deleteEntry(oldest);
+    }
+  }
+
   return {
+    get: (slot, revision) => getFreshEntry(slot, revision)?.value,
+    store,
     getOrBuild({ build, revision, slot, threadId }) {
-      const cached = entries.get(slot);
-      if (cached !== undefined) {
-        deleteEntry(slot);
-        if (
-          cached.revision === revision &&
-          (cached.expiresAt === null || Date.now() < cached.expiresAt)
-        ) {
-          insert(slot, cached);
-          return cached.value;
-        }
-      }
-      const { expiresAt, value } = build(cached?.value);
-      const bytes = budget === null ? 0 : budget.measure(value);
-      if (bytes <= maxEntryBytes) {
-        insert(slot, { bytes, expiresAt, revision, threadId, value });
-        while (entries.size > options.maxEntries || totalBytes > maxBytes) {
-          const oldest = entries.keys().next().value;
-          if (oldest === undefined) {
-            break;
-          }
-          deleteEntry(oldest);
-        }
-      }
-      return value;
+      const cached = getFreshEntry(slot, revision);
+      if (cached !== undefined) return cached.value;
+      const previous = entries.get(slot);
+      deleteEntry(slot);
+      const built = build(previous?.value);
+      store(slot, revision, threadId, built);
+      return built.value;
     },
     invalidateThread(threadId) {
       for (const [slot, entry] of entries) {
