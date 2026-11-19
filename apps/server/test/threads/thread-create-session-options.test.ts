@@ -1,6 +1,6 @@
 import { upsertProjectExecutionDefaults } from "@bb/db";
 import { threadSchema } from "@bb/domain";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { waitForQueuedCommand } from "../helpers/commands.js";
 import { readJson } from "../helpers/json.js";
 import {
@@ -73,6 +73,7 @@ async function createThread(
     hostId: string;
     projectId: string;
     sessionOptions?: unknown;
+    codexAutoCompactTokenLimit?: unknown;
     model?: string | null;
   },
 ) {
@@ -85,6 +86,7 @@ async function createThread(
       providerId: "codex",
       ...(args.model === null ? {} : { model: args.model ?? "gpt-5" }),
       input: [{ type: "text", text: "Start with my options" }],
+      codexAutoCompactTokenLimit: args.codexAutoCompactTokenLimit,
       ...(args.sessionOptions === undefined
         ? {}
         : { sessionOptions: args.sessionOptions }),
@@ -285,3 +287,50 @@ describe("session options chosen when a thread is created", () => {
     });
   });
 });
+
+it.each([
+  { supplied: undefined, expected: undefined },
+  { supplied: 200_000, expected: 200_000 },
+  { supplied: "200000", expected: undefined },
+  { supplied: 200_000.5, expected: undefined },
+  { supplied: 99_999, expected: undefined },
+  { supplied: 400_001, expected: undefined },
+])(
+  "passes only valid Codex auto-compaction limits: $supplied",
+  async ({ supplied, expected }) => {
+    await withTestHarness(async (harness) => {
+      const { host, project } = seedWorkspace(harness, "create-compact-limit");
+      const warn = vi.spyOn(harness.deps.logger, "warn");
+      const response = await createThread(harness, {
+        hostId: host.id,
+        projectId: project.id,
+        codexAutoCompactTokenLimit: supplied,
+      });
+      expect(response.status).toBe(201);
+      const thread = threadSchema.parse(await readJson(response));
+      const { command } = await waitForQueuedCommand(
+        harness,
+        ({ command }) =>
+          command.type === "thread.start" && command.threadId === thread.id,
+      );
+      if (command.type !== "thread.start") {
+        throw new Error("Expected thread.start");
+      }
+      if (expected === undefined) {
+        expect(command.options.providerOptions).not.toHaveProperty(
+          "codexAutoCompactTokenLimit",
+        );
+      } else {
+        expect(command.options.providerOptions).toHaveProperty(
+          "codexAutoCompactTokenLimit",
+          expected,
+        );
+      }
+      expect(
+        warn.mock.calls.filter(([, message]) =>
+          message?.startsWith("Ignoring invalid Codex auto-compaction"),
+        ),
+      ).toHaveLength(supplied !== undefined && expected === undefined ? 1 : 0);
+    });
+  },
+);

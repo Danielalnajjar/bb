@@ -1,5 +1,6 @@
 import {
   environments,
+  getThreadCodexAutoCompactTokenLimit,
   hasStoredSpawnAgentToolCall,
   liveThread,
   threads,
@@ -223,6 +224,10 @@ function toRuntimeExecutionOptions(
       permissionMode,
       ...(promptMode !== undefined ? { promptMode } : {}),
     }) ?? {};
+  const compactLimit =
+    args.providerId === "codex"
+      ? getThreadCodexAutoCompactTokenLimit(args.deps.db, args.threadId)
+      : undefined;
   const sessionOptions = resolvePendingThreadSessionOptions(
     args.deps.db,
     args.threadId,
@@ -257,7 +262,10 @@ function toRuntimeExecutionOptions(
     ...(reasoningLevel === undefined ? {} : { reasoningLevel }),
     ...(promptMode !== undefined ? { promptMode } : {}),
     ...(Object.keys(sessionOptions).length > 0 ? { sessionOptions } : {}),
-    providerOptions,
+    providerOptions:
+      compactLimit === undefined
+        ? providerOptions
+        : { ...providerOptions, codexAutoCompactTokenLimit: compactLimit },
   };
   if (permissionMode === "full") {
     return {

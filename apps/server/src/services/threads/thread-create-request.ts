@@ -25,6 +25,7 @@ export interface ThreadCreateServiceRequestInput {
   sendAt?: CreateThreadRequest["sendAt"];
   input: PromptInput[];
   pluginMetadata?: CreateThreadRequest["pluginMetadata"];
+  codexAutoCompactTokenLimit?: CreateThreadRequest["codexAutoCompactTokenLimit"];
   pluginSubmission?: CreateThreadRequest["pluginSubmission"];
   sectionId?: CreateThreadRequest["sectionId"];
   pinned?: CreateThreadRequest["pinned"];
@@ -51,10 +52,11 @@ export interface ThreadCreateServiceRequestInput {
 
 export interface ThreadCreateServiceRequest extends Omit<
   ThreadCreateServiceRequestInput,
-  "environment" | "pluginMetadata" | "providerId"
+  "environment" | "pluginMetadata" | "providerId" | "codexAutoCompactTokenLimit"
 > {
   environment: EnvironmentArgs | ProviderEnvironmentArgs;
   pluginMetadata: { pluginId: string; metadata: JsonObject } | null;
+  codexAutoCompactTokenLimit?: number;
   providerId: string;
   parentNotifications: ThreadParentNotifications;
   titleFallback: string | null;

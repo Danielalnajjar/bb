@@ -3,6 +3,7 @@ import { seedModelCatalog } from "../helpers/provider-model-catalogs.js";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  createThread,
   createProjectSource,
   ensurePersonalProject,
   getEnvironment,
@@ -78,6 +79,7 @@ function seedForkSource(
     serviceTier?: string;
     title?: string | null;
     titleFallback?: string | null;
+    codexAutoCompactTokenLimit?: number;
   } = {},
 ) {
   const { host } = seedHostSession(harness.deps);
@@ -99,13 +101,14 @@ function seedForkSource(
             args.environmentProvider(host).selection,
         }),
   });
-  const sourceThread = seedThread(harness.deps, {
+  const sourceThread = createThread(harness.db, harness.hub, {
     environmentId: environment.id,
     projectId: project.id,
-    ...(args.title === undefined ? {} : { title: args.title }),
-    ...(args.titleFallback === undefined
-      ? {}
-      : { titleFallback: args.titleFallback }),
+    providerId: "codex",
+    status: "idle",
+    title: args.title ?? "Test Thread",
+    titleFallback: args.titleFallback ?? "Test Thread",
+    codexAutoCompactTokenLimit: args.codexAutoCompactTokenLimit,
   });
   seedThreadRuntimeState(harness.deps, {
     environmentId: environment.id,
@@ -206,6 +209,53 @@ async function createIdleSeededFork(
 }
 
 describe("public thread fork route", () => {
+  it("carries the source's compaction limit on fork and on its later resume", async () => {
+    await withTestHarness(async (harness) => {
+      const { sourceThread } = seedForkSource(harness, {
+        codexAutoCompactTokenLimit: 200_000,
+      });
+      const response = await postFork(harness, {
+        sourceThreadId: sourceThread.id,
+      });
+      expect(response.status).toBe(201);
+      const fork = threadResponseSchema.parse(await readJson(response));
+      const start = await waitForQueuedCommand(
+        harness,
+        ({ command }) =>
+          command.type === "thread.start" && command.threadId === fork.id,
+      );
+      expect(start.command).toMatchObject({
+        fork: { sourceProviderThreadId: "provider-fork-source" },
+        options: { providerOptions: { codexAutoCompactTokenLimit: 200_000 } },
+      });
+      await reportQueuedCommandSuccess(harness, start, {
+        providerThreadId: "provider-qa-fork",
+      });
+      const sendResponse = await harness.app.request(
+        `/api/v1/threads/${fork.id}/send`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            input: textInput("Continue the fork"),
+            mode: "auto",
+            permissionMode: "full",
+          }),
+        },
+      );
+      expect(sendResponse.status).toBe(200);
+      const turn = await waitForQueuedCommand(
+        harness,
+        ({ command }) =>
+          command.type === "turn.submit" && command.threadId === fork.id,
+      );
+      expect(turn.command).toMatchObject({
+        resumeContext: { providerThreadId: "provider-qa-fork" },
+        options: { providerOptions: { codexAutoCompactTokenLimit: 200_000 } },
+      });
+    });
+  });
+
   it.each(["delete", "archive"])(
     "rejects a fork when its source is %s during asynchronous setup",
     async (action) => {

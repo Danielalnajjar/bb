@@ -134,6 +134,7 @@ export const createThreadRequestSchema = z
     origin: threadCreateOriginSchema,
     originPluginId: z.string().min(1).optional(),
     pluginMetadata: pluginMetadataSchema.optional(),
+    codexAutoCompactTokenLimit: jsonValueSchema.optional(),
     lifecycleOwnerThreadId: z.string().min(1).optional(),
     visibility: threadVisibilitySchema.optional(),
     title: z.string().min(1).optional(),

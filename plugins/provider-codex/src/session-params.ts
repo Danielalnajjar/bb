@@ -25,6 +25,7 @@ export type CodexSessionOptions = {
   model?: string;
   serviceTier?: ServiceTier;
   reasoningLevel?: ReasoningLevel;
+  codexAutoCompactTokenLimit?: number;
   memoryEnabled?: boolean;
   providerSubagentsEnabled?: boolean;
   instructions?: string;
@@ -647,6 +648,10 @@ export function buildCodexConfig(
     config["model_reasoning_effort"] = toCodexReasoningEffort(
       args.options.reasoningLevel,
     );
+  }
+  if (args.options?.codexAutoCompactTokenLimit !== undefined) {
+    config["model_auto_compact_token_limit"] =
+      args.options.codexAutoCompactTokenLimit;
   }
   if (args.options?.providerSubagentsEnabled === false) {
     if (args.supportsAgentsEnabled) {
