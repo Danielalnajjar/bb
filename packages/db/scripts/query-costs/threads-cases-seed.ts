@@ -1,6 +1,5 @@
 import {
   encodeClientTurnRequestIdNumber,
-  RESTART_RESUME_METADATA_KEY,
   threadScope,
   turnScope,
   type JsonObject,
@@ -19,10 +18,7 @@ import { createProject } from "../../src/data/projects.js";
 import { createPromptHistoryEntry } from "../../src/data/prompt-history.js";
 import { createTerminalSession } from "../../src/data/terminal-sessions.js";
 import { createPromptHistoryEntryId, createThreadId } from "../../src/ids.js";
-import {
-  insertThreadCodexAutoCompactTokenLimit,
-  insertThreadPluginMetadata,
-} from "../../src/data/thread-plugin-metadata.js";
+import { insertThreadPluginMetadata } from "../../src/data/thread-plugin-metadata.js";
 import {
   advanceThreadPruning,
   pickThreadPruningThread,
@@ -1115,16 +1111,6 @@ export function seedThreads(
     (thread) => live(thread) && thread.spec.index % 30 === 3,
     "thread with two plugin namespaces",
   ).id;
-  db.transaction((tx) => {
-    insertThreadCodexAutoCompactTokenLimit(tx, pluginMetadataThreadId, 200_000);
-    insertThreadPluginMetadata(tx, {
-      threadId: pluginMetadataThreadId,
-      pluginId: "tasks",
-      metadata: {
-        [RESTART_RESUME_METADATA_KEY]: { hold: false, receiptBacked: true },
-      },
-    });
-  });
   const tabsThread = requireThread(
     threads,
     (thread) => live(thread) && thread.spec.index % 10 < 7,
