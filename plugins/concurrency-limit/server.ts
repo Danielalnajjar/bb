@@ -393,6 +393,7 @@ export default async function concurrencyLimitPlugin(
       const targets = availableHosts.filter(
         (availableHost) =>
           availableHost.status === "connected" &&
+          availableHost.lifecycle.phase === "active" &&
           (refreshAll || hostIds.has(availableHost.id)),
       );
       await Promise.all(
@@ -468,14 +469,14 @@ export default async function concurrencyLimitPlugin(
         event: "host:changed",
         callback: (event) => {
           if (
-            event.changes.some(
+            !event.changes.some(
               (change) =>
                 change === "host-connected" || change === "host-disconnected",
             )
           )
-            bb.realtime.publish(CONFIGURATION_CHANGED_CHANNEL, {});
-          if (event.changes.includes("host-connected"))
-            requestRefresh(event.id);
+            return;
+          bb.realtime.publish(CONFIGURATION_CHANGED_CHANNEL, {});
+          requestRefresh(event.id);
         },
       });
       const unsubscribeRealtime = bb.sdk.subscribe({
