@@ -287,10 +287,13 @@ export type HostDaemonProjectAttachmentContentQuery = z.infer<
   typeof hostDaemonProjectAttachmentContentQuerySchema
 >;
 
+export const HOST_DAEMON_EVENT_IDS_HEADER = "x-bb-event-ids";
+
 const hostDaemonEventEnvelopeSchema = z
   .object({
     threadId: z.string().min(1),
     event: threadEventSchema,
+    eventId: z.uuid().optional(),
   })
   .strict();
 export type HostDaemonEventEnvelope = z.infer<
@@ -315,8 +318,18 @@ const hostDaemonEventGroupSchema = z
   .object({
     threadId: z.string().min(1),
     events: z.array(hostDaemonWireEventSchema).min(1),
+    eventIds: z.array(z.uuid()).optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (group) =>
+      group.eventIds === undefined ||
+      group.eventIds.length === group.events.length,
+    {
+      message: "eventIds must have one entry per event",
+      path: ["eventIds"],
+    },
+  );
 type HostDaemonEventGroup = z.infer<typeof hostDaemonEventGroupSchema>;
 
 export const hostDaemonEventBatchRequestSchema = z
@@ -331,24 +344,41 @@ export type HostDaemonEventBatchRequest = z.infer<
 
 export function groupHostDaemonEvents(
   envelopes: readonly HostDaemonEventEnvelope[],
+  options: { includeEventIds?: boolean } = {},
 ): HostDaemonEventGroup[] {
   const groups: HostDaemonEventGroup[] = [];
+  const groupEventIds: (string | undefined)[][] = [];
   for (const envelope of envelopes) {
     const last = groups.at(-1);
     if (last?.threadId === envelope.threadId) {
       last.events.push(envelope.event);
+      groupEventIds.at(-1)?.push(envelope.eventId);
     } else {
       groups.push({ threadId: envelope.threadId, events: [envelope.event] });
+      groupEventIds.push([envelope.eventId]);
     }
   }
-  return groups;
+  if (options.includeEventIds !== true) return groups;
+  return groups.map((group, index) => {
+    const eventIds = (groupEventIds[index] ?? []).filter(
+      (eventId) => eventId !== undefined,
+    );
+    return eventIds.length === group.events.length
+      ? { ...group, eventIds }
+      : group;
+  });
 }
 
 export function ungroupHostDaemonEvents(
   groups: readonly HostDaemonEventGroup[],
 ): HostDaemonEventEnvelope[] {
   return groups.flatMap((group) =>
-    group.events.map((event) => ({ threadId: group.threadId, event })),
+    group.events.map((event, index) => {
+      const eventId = group.eventIds?.[index];
+      return eventId === undefined
+        ? { threadId: group.threadId, event }
+        : { threadId: group.threadId, event, eventId };
+    }),
   );
 }
 

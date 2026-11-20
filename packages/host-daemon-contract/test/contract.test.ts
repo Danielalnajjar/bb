@@ -3333,6 +3333,132 @@ describe("host-daemon session schemas", () => {
     });
   });
 
+  describe("event occurrence ids", () => {
+    const firstEventId = "0b8e4c1f-3a2d-4f6e-9b7a-1c2d3e4f5a6b";
+    const secondEventId = "7d6c5b4a-3f2e-4d1c-8b0a-9f8e7d6c5b4a";
+    const errorEvent = (message: string) => ({
+      type: "system/error" as const,
+      threadId: "thr_123",
+      scope: threadScope(),
+      message,
+    });
+    const batch = (group: Record<string, unknown>) => ({
+      sessionId: "session_123",
+      eventGroups: [{ threadId: "thr_123", ...group }],
+    });
+
+    it("exports the session-open capability header name", () => {
+      expect(contract.HOST_DAEMON_EVENT_IDS_HEADER).toBe("x-bb-event-ids");
+    });
+
+    it("parses a stock-shaped request without eventIds unchanged", () => {
+      const stock = batch({ events: [errorEvent("one"), errorEvent("two")] });
+      const parsed = hostDaemonEventBatchRequestSchema.parse(stock);
+      expect(parsed).toEqual(stock);
+      expect(parsed.eventGroups[0]).not.toHaveProperty("eventIds");
+    });
+
+    it("accepts one UUID per event", () => {
+      expect(
+        hostDaemonEventBatchRequestSchema.parse(
+          batch({
+            events: [errorEvent("one"), errorEvent("two")],
+            eventIds: [firstEventId, secondEventId],
+          }),
+        ).eventGroups[0]?.eventIds,
+      ).toEqual([firstEventId, secondEventId]);
+    });
+
+    it.each([
+      ["fewer", [firstEventId]],
+      [
+        "more",
+        [firstEventId, secondEventId, "c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f"],
+      ],
+    ])("rejects %s eventIds than events", (_label, eventIds) => {
+      const result = hostDaemonEventBatchRequestSchema.safeParse(
+        batch({
+          events: [errorEvent("one"), errorEvent("two")],
+          eventIds,
+        }),
+      );
+      expect(result.success).toBe(false);
+      expect(result.error?.issues.map((issue) => issue.path)).toEqual([
+        ["eventGroups", 0, "eventIds"],
+      ]);
+    });
+
+    it("rejects a non-UUID event id", () => {
+      expect(
+        hostDaemonEventBatchRequestSchema.safeParse(
+          batch({ events: [errorEvent("one")], eventIds: ["evt_not_a_uuid"] }),
+        ).success,
+      ).toBe(false);
+    });
+
+    it("round-trips event ids through group and ungroup", () => {
+      const envelopes = [
+        {
+          threadId: "thr_123",
+          event: errorEvent("one"),
+          eventId: firstEventId,
+        },
+        {
+          threadId: "thr_123",
+          event: errorEvent("two"),
+          eventId: secondEventId,
+        },
+        {
+          threadId: "thr_456",
+          event: { ...errorEvent("three"), threadId: "thr_456" },
+          eventId: "c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f",
+        },
+      ];
+      const groups = contract.groupHostDaemonEvents(envelopes, {
+        includeEventIds: true,
+      });
+      expect(groups.map((group) => group.eventIds)).toEqual([
+        [firstEventId, secondEventId],
+        ["c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f"],
+      ]);
+      const parsed = hostDaemonEventBatchRequestSchema.parse({
+        sessionId: "session_123",
+        eventGroups: groups,
+      });
+      expect(contract.ungroupHostDaemonEvents(parsed.eventGroups)).toEqual(
+        envelopes,
+      );
+    });
+
+    it("omits eventIds unless requested and every envelope carries one", () => {
+      const identified = [
+        {
+          threadId: "thr_123",
+          event: errorEvent("one"),
+          eventId: firstEventId,
+        },
+      ];
+      expect(contract.groupHostDaemonEvents(identified)[0]).not.toHaveProperty(
+        "eventIds",
+      );
+      expect(
+        contract.groupHostDaemonEvents(identified, {
+          includeEventIds: false,
+        })[0],
+      ).not.toHaveProperty("eventIds");
+      expect(
+        contract.groupHostDaemonEvents(
+          [...identified, { threadId: "thr_123", event: errorEvent("two") }],
+          { includeEventIds: true },
+        )[0],
+      ).not.toHaveProperty("eventIds");
+      const ungrouped = contract.ungroupHostDaemonEvents(
+        contract.groupHostDaemonEvents(identified),
+      );
+      expect(ungrouped[0]).not.toHaveProperty("eventId");
+    });
+  });
+
   it("restricts daemon websocket control and RPC messages", () => {
     expect(
       hostDaemonServerWsMessageSchema.safeParse({
