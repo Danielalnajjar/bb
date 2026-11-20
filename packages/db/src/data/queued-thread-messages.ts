@@ -592,6 +592,18 @@ export function listQueuedThreadMessages(
     .all();
 }
 
+export function getLiveQueuedThreadMessageGroup(
+  db: DbQueryConnection,
+  threadId: string,
+  id: string,
+): QueuedThreadMessageRow[] | null {
+  return (
+    partitionQueuedMessageGroups(listQueuedThreadMessages(db, threadId)).find(
+      (rows) => rows.some((row) => row.id === id),
+    ) ?? null
+  );
+}
+
 export function listThreadQueuedMessagesIncludingClaims(
   db: DbQueryConnection,
   threadId: string,
@@ -1552,11 +1564,7 @@ export function claimQueuedThreadMessageGroup(
       ) {
         return null;
       }
-      const queuedMessages = listQueuedThreadMessages(tx, existing.threadId);
-      const group =
-        partitionQueuedMessageGroups(queuedMessages).find((rows) =>
-          rows.some((row) => row.id === id),
-        ) ?? null;
+      const group = getLiveQueuedThreadMessageGroup(tx, existing.threadId, id);
       if (group === null) {
         return null;
       }

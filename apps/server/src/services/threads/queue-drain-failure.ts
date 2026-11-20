@@ -1,5 +1,5 @@
 import {
-  getQueuedThreadMessage,
+  getLiveQueuedThreadMessageGroup,
   isRestartResumeQueuedMessage,
   setQueuedThreadMessageFailureReason,
   setQueuedThreadMessageWaitingOn,
@@ -67,11 +67,14 @@ export function recordQueuedMessageDrainFailure(
     thread: Thread;
   },
 ): boolean {
-  const row = getQueuedThreadMessage(deps.db, args.row.id);
+  const group = getLiveQueuedThreadMessageGroup(
+    deps.db,
+    args.row.threadId,
+    args.row.id,
+  );
   if (
-    row !== null &&
-    isRestartResumeQueuedMessage(row) &&
-    readLoggedRestartResumeFacts(deps, row.threadId).hold !== null
+    group?.some(isRestartResumeQueuedMessage) &&
+    readLoggedRestartResumeFacts(deps, args.row.threadId).hold !== null
   ) {
     return false;
   }

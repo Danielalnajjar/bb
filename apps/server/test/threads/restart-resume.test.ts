@@ -753,6 +753,102 @@ describe("resuming threads after a restart", () => {
     },
   );
 
+  it("reoffers a grouped restart retry when its inline row wakes the group and the hook rejects under a hold", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    await withTestHarness(async (harness) => {
+      continueAfterRestarts(harness, true);
+      const fixture = seedHostWithProject(harness);
+      const { thread, requestId } = seedRunningThread(harness, fixture);
+      await restartDaemon(harness, fixture);
+      const [retry] = queue(harness, thread.id);
+      if (retry?.sendAt == null)
+        throw new Error("Expected a scheduled restart retry");
+      const followUp = textInput("Take the new instruction");
+      const sent = await harness.app.request(
+        `/api/v1/threads/${thread.id}/send`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            input: followUp,
+            mode: "auto",
+            model: retry.model,
+            reasoningLevel: retry.reasoningLevel,
+            permissionMode: retry.permissionMode,
+            serviceTier: retry.serviceTier,
+            sendAt: retry.sendAt - 100,
+          }),
+        },
+      );
+      expect(sent.status).toBe(200);
+      const [, inline] = queue(harness, thread.id);
+      if (inline === undefined) throw new Error("Expected an inline row");
+      expect(inline).toMatchObject({
+        payload: { kind: "inline" },
+        sendAt: retry.sendAt - 100,
+      });
+      const ids = [retry.id, inline.id];
+      const grouped = await harness.app.request(
+        `/api/v1/threads/${thread.id}/queued-messages/group-boundary`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expectedGroupedPrefixQueuedMessageIds: ids,
+            groupBoundaryQueuedMessageId: inline.id,
+          }),
+        },
+      );
+      expect(grouped.status).toBe(200);
+      const before = listQueuedThreadMessages(harness.db, thread.id);
+      vi.setSystemTime(retry.sendAt);
+
+      const entered = createDeferredPromise<void>();
+      const release = createDeferredPromise<void>();
+      const offers: string[][] = [];
+      installDispatchHook(async (context) => {
+        if (context.thread.id !== thread.id) return { action: "proceed" };
+        offers.push(context.queuedMessages.map(({ id }) => id));
+        if (offers.length !== 1) return { action: "proceed" };
+        entered.resolve();
+        await release.promise;
+        return { action: "reject", message: "At capacity" };
+      });
+      const sweeping = runDueWake(harness);
+      try {
+        await Promise.race([
+          entered.promise,
+          sweeping.then(() => {
+            throw new Error("The due hook was not reached");
+          }),
+        ]);
+        expect(offers).toEqual([ids]);
+        await patchRestartResumeMetadata(harness, thread.id, {
+          set: { [RESTART_RESUME_METADATA_KEY]: { hold: true } },
+        });
+      } finally {
+        release.resolve();
+        await sweeping;
+      }
+      expect(turnRequests(harness, thread.id)).toHaveLength(1);
+      expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual(
+        before.map((row) => ({ ...row, updatedAt: Date.now() })),
+      );
+
+      await patchRestartResumeMetadata(harness, thread.id, {
+        remove: [RESTART_RESUME_METADATA_KEY],
+      });
+      await expectRestartDelivered(harness, thread.id, requestId);
+      await runDueWake(harness);
+      expect(offers).toEqual([ids, ids]);
+      expect(turnRequests(harness, thread.id)).toHaveLength(2);
+      expect(lastTurnRequest(harness, thread.id).inputGroups).toEqual([
+        retry.content,
+        followUp,
+      ]);
+    });
+  });
+
   it("reoffers only on last clear inside the plugin pacing window", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     await withTestHarness(async (harness) => {
@@ -813,7 +909,7 @@ describe("resuming threads after a restart", () => {
   });
 
   it("reoffers a queued restart retry on last clear after its waiting plugin unregisters", async () => {
-    vi.useFakeTimers({ toFake: ["Date", "setImmediate", "clearImmediate"] });
+    vi.useFakeTimers({ toFake: ["Date"] });
     await withTestHarness(async (harness) => {
       continueAfterRestarts(harness, true);
       const fixture = seedHostWithProject(harness);
@@ -838,7 +934,7 @@ describe("resuming threads after a restart", () => {
         kind: "plugin-unregistered",
         pluginId: "limiter",
       });
-      await vi.advanceTimersByTimeAsync(1);
+      await new Promise<void>((resolve) => setImmediate(resolve));
       expect(getQueuedThreadMessage(harness.db, row.id)).toMatchObject({
         state: "queued",
         sendAt: null,
@@ -849,13 +945,13 @@ describe("resuming threads after a restart", () => {
       await patchRestartResumeMetadata(harness, thread.id, {
         remove: [RESTART_RESUME_METADATA_KEY],
       });
-      await vi.advanceTimersByTimeAsync(0);
+      await new Promise<void>((resolve) => setImmediate(resolve));
       await expectRestartDelivered(harness, thread.id, requestId);
     });
   });
 
   it("leaves a future-dated plugin wait alone on last clear until it is due", async () => {
-    vi.useFakeTimers({ toFake: ["Date", "setImmediate", "clearImmediate"] });
+    vi.useFakeTimers({ toFake: ["Date"] });
     await withTestHarness(async (harness) => {
       continueAfterRestarts(harness, true);
       const fixture = seedHostWithProject(harness);
@@ -886,7 +982,7 @@ describe("resuming threads after a restart", () => {
       await patchRestartResumeMetadata(harness, thread.id, {
         remove: [RESTART_RESUME_METADATA_KEY],
       });
-      await vi.advanceTimersByTimeAsync(0);
+      await new Promise<void>((resolve) => setImmediate(resolve));
       expect(hook).toHaveBeenCalledOnce();
       expect(getQueuedThreadMessage(harness.db, row.id)).toEqual(waiting);
       expect(turnRequests(harness, thread.id)).toHaveLength(1);
@@ -935,7 +1031,9 @@ describe("resuming threads after a restart", () => {
       });
       const offers: string[][] = [];
       installDispatchHook((context) => {
-        offers.push(context.queuedMessages.map(({ id }) => id));
+        if (context.thread.id === thread.id) {
+          offers.push(context.queuedMessages.map(({ id }) => id));
+        }
         return { action: "proceed" };
       });
       await restartDaemon(harness, fixture, instanceId);
