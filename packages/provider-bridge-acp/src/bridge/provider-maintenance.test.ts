@@ -76,7 +76,11 @@ describe("ACP provider maintenance", () => {
           versionUnsupported: false,
         });
         expect(
-          await getAcpProviderHealth({ command, maintenance: undefined }),
+          await getAcpProviderHealth({
+            command,
+            maintenance: undefined,
+            executableConfigured: false,
+          }),
         ).toMatchObject({
           supported: true,
           health: { status: "ready", installedVersion: version },
