@@ -10,6 +10,7 @@ import {
   getAppSettings,
   insertThreadPluginMetadata,
   setAppSettings,
+  setQueuedThreadMessageWaitingOn,
   threads,
 } from "@bb/db";
 import {
@@ -860,6 +861,60 @@ describe("resuming threads after a restart", () => {
       });
       await expectRestartDelivered(harness, thread.id, requestId);
       expect(offers).toEqual([[retry.id]]);
+    });
+  });
+
+  it("leaves an archived thread's offline restart retry untouched when the hold clears", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setImmediate", "clearImmediate"] });
+    await withTestHarness(async (harness) => {
+      continueAfterRestarts(harness, true);
+      const fixture = seedHostWithProject(harness);
+      const { thread } = seedRunningThread(harness, fixture);
+      const instanceId = "replacement-daemon";
+      vi.setSystemTime(Date.now() + 1);
+      const sessionId = await restartDaemon(harness, fixture, instanceId);
+      const [retry] = listQueuedThreadMessages(harness.db, thread.id);
+      if (retry?.sendAt == null)
+        throw new Error("Expected a scheduled restart retry");
+      await patchRestartResumeMetadata(harness, thread.id, {
+        set: { [RESTART_RESUME_METADATA_KEY]: { hold: true } },
+      });
+
+      handleDaemonSocketClosed(harness.deps, { sessionId });
+      expect(harness.hub.hasDaemonForHost(fixture.host.id)).toBe(false);
+      vi.setSystemTime(retry.sendAt);
+      const parked = setQueuedThreadMessageWaitingOn(harness.db, harness.hub, {
+        id: retry.id,
+        threadId: thread.id,
+        waitingOn: { kind: "host-offline", hostName: fixture.host.name },
+        sendAt: null,
+      });
+      expect(parked).toMatchObject({ state: "waiting", sendAt: null });
+      const offeredThreadIds: string[] = [];
+      installDispatchHook((context) => {
+        offeredThreadIds.push(context.thread.id);
+        return { action: "proceed" };
+      });
+      await restartDaemon(harness, fixture, instanceId);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(harness.hub.hasDaemonForHost(fixture.host.id)).toBe(true);
+      expect(getQueuedThreadMessage(harness.db, retry.id)).toEqual(parked);
+
+      const archived = await harness.app.request(
+        `/api/v1/threads/${thread.id}/archive-all`,
+        { method: "POST" },
+      );
+      expect(archived.status, await archived.text()).toBe(200);
+      expect(getThread(harness.db, thread.id)?.archivedAt).toBe(Date.now());
+      vi.setSystemTime(Date.now() + 1);
+
+      await patchRestartResumeMetadata(harness, thread.id, {
+        remove: [RESTART_RESUME_METADATA_KEY],
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getQueuedThreadMessage(harness.db, retry.id)).toEqual(parked);
+      expect(turnRequests(harness, thread.id)).toHaveLength(1);
+      expect(offeredThreadIds).not.toContain(thread.id);
     });
   });
 

@@ -445,8 +445,9 @@ describe("slow query index plans", () => {
       expect(captured).toHaveLength(1);
       const details = queryPlanDetails({ db, ...captured[0]! });
       expect(details).toMatch(
-        /SEARCH queued_thread_messages .*\(thread_id=\?\)/u,
+        /^SEARCH queued_thread_messages .*\([^)]*\bthread_id=\?(?:\s|\))/mu,
       );
+      expect(details).not.toMatch(/^SCAN queued_thread_messages\b/mu);
     } finally {
       db.$client.close();
     }

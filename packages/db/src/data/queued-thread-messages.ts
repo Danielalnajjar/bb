@@ -2603,9 +2603,11 @@ export function getDueWaitingRestartResume(
       threadId: queuedThreadMessages.threadId,
     })
     .from(queuedThreadMessages)
+    .innerJoin(threads, eq(threads.id, queuedThreadMessages.threadId))
     .where(
       and(
         eq(queuedThreadMessages.threadId, threadId),
+        liveThread,
         eq(queuedThreadMessages.payloadKind, "retry"),
         eq(queuedThreadMessages.retryReason, RESTART_RESUME_RETRY_REASON),
         eq(queuedThreadMessages.state, "waiting"),

@@ -38,7 +38,10 @@ import { createThreadFromRequest } from "../../src/services/threads/thread-creat
 import { retryFailedTurn } from "../../src/services/threads/turn-retry.js";
 import { moveThreadStatus } from "../helpers/thread-status.js";
 import { createClientTurnRequestId } from "../../src/services/threads/thread-events.js";
-import { toThreadQueuedMessage } from "../../src/services/threads/thread-queued-messages.js";
+import {
+  parseStoredQueuedThreadMessageWaitingOn,
+  toThreadQueuedMessage,
+} from "../../src/services/threads/thread-queued-messages.js";
 import { textInput } from "../helpers/prompt-input.js";
 import {
   internalAuthHeaders,
@@ -339,16 +342,22 @@ describe("message.dispatch hook context", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(getThread(harness.db, thread.id)?.status).toBe("idle");
       expect(turnRequests(harness, thread.id)).toHaveLength(1);
-      expect(listQueuedThreadMessages(harness.db, thread.id)).toMatchObject([
+      expect(
+        listQueuedThreadMessages(harness.db, thread.id).map((entry) => ({
+          id: entry.id,
+          sendAt: entry.sendAt,
+          waitingOn: parseStoredQueuedThreadMessageWaitingOn(entry),
+        })),
+      ).toEqual([
         {
           id: row.id,
           sendAt,
-          waitingOn: JSON.stringify({
+          waitingOn: {
             kind: "plugin",
             pluginId: "limiter",
             reason: "Waiting for idle",
             notBefore: sendAt,
-          }),
+          },
         },
       ]);
 
