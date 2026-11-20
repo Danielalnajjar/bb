@@ -27,6 +27,10 @@ import {
   getActiveStoredTurnId,
   getFirstParentedTimelineBoundarySequence,
   getHighWaterMarks,
+  hasHandledRootTurnCompletion,
+  isEventLifecycleApplied,
+  markEventLifecycleApplied,
+  markTurnCompletionParentNoticeHandled,
   getLastStoredProviderThreadId,
   classifyStoredProviderThreadClaim,
   getStoredProviderSession,
@@ -541,6 +545,7 @@ describe("events", () => {
         },
       ],
       insertedInputIndexes: [0, 1],
+      replayedInputIndexes: [],
       skippedTurnUnstartedInputIndexes: [],
     });
     expect(listEvents(db, { threadId: thread.id })).toMatchObject([
@@ -698,6 +703,7 @@ describe("events", () => {
         { threadId: thread.id, sequence: 6 },
       ],
       insertedInputIndexes: [1, 2, 3],
+      replayedInputIndexes: [],
       skippedTurnUnstartedInputIndexes: [],
     });
     expect(listEvents(db, { threadId: thread.id })).toMatchObject([
@@ -827,6 +833,7 @@ describe("events", () => {
         { threadId: thread.id, sequence: 5 },
       ],
       insertedInputIndexes: [1, 2],
+      replayedInputIndexes: [],
       skippedTurnUnstartedInputIndexes: [],
     });
   });
@@ -870,6 +877,7 @@ describe("events", () => {
     expect(replay).toEqual({
       acceptedEvents: [{ threadId: thread.id, sequence: 3 }],
       insertedInputIndexes: [1],
+      replayedInputIndexes: [],
       skippedTurnUnstartedInputIndexes: [],
     });
     expect(
@@ -900,6 +908,394 @@ describe("events", () => {
     expect(
       listEvents(db, { threadId: thread.id }).map((event) => event.type),
     ).toEqual(["turn/started"]);
+  });
+
+  describe("identified daemon events", () => {
+    const providerThreadId = "provider_thr_identified";
+
+    function identifiedTurnInputs(threadId: string, turnId: string) {
+      const turnFields = {
+        threadId,
+        ...createTurnEventFields({ turnId }),
+        environmentId: null,
+        providerThreadId,
+      };
+      const itemFields = {
+        ...turnFields,
+        itemId: "msg_identified",
+        itemKind: "agentMessage" as const,
+      };
+      const delta = (id: string, text: string): AppendDaemonEventInput => ({
+        ...itemFields,
+        id,
+        type: "item/agentMessage/delta",
+        data: JSON.stringify({ itemId: "msg_identified", delta: text }),
+      });
+      return {
+        started: {
+          ...turnFields,
+          id: `evt_${turnId}_started`,
+          type: "turn/started",
+          data: JSON.stringify({ providerThreadId }),
+        } satisfies AppendDaemonEventInput,
+        delta,
+        itemCompleted: {
+          ...itemFields,
+          id: `evt_${turnId}_item_completed`,
+          type: "item/completed",
+          data: JSON.stringify({
+            item: { id: "msg_identified", type: "agentMessage", text: "Echo" },
+          }),
+        } satisfies AppendDaemonEventInput,
+        completed: {
+          ...turnFields,
+          id: `evt_${turnId}_completed`,
+          type: "turn/completed",
+          data: JSON.stringify({ providerThreadId, status: "completed" }),
+        } satisfies AppendDaemonEventInput,
+      };
+    }
+
+    function append(db: DbConnection, inputs: AppendDaemonEventInput[]) {
+      return db.transaction(
+        (tx) => appendDaemonEventsInTransaction(tx, inputs),
+        { behavior: "immediate" },
+      );
+    }
+
+    function storedRows(db: DbConnection, threadId: string) {
+      return listEvents(db, { threadId }).map((event) => ({
+        id: event.id,
+        sequence: event.sequence,
+        type: event.type,
+      }));
+    }
+
+    it("stores an identified event under its given id", () => {
+      const { db, thread } = setup();
+      const turn = identifiedTurnInputs(thread.id, "turn_id_stored");
+
+      append(db, [turn.started]);
+
+      expect(storedRows(db, thread.id)).toEqual([
+        { id: "evt_turn_id_stored_started", sequence: 1, type: "turn/started" },
+      ]);
+    });
+
+    it("re-appends nothing for an identified replay and consumes no sequence", () => {
+      const { db, thread } = setup();
+      const turn = identifiedTurnInputs(thread.id, "turn_id_replay");
+      append(db, [turn.started, turn.delta("evt_delta_a", "Echo")]);
+
+      const replay = append(db, [turn.started, turn.delta("evt_delta_a", "Echo")]);
+      const next = append(db, [turn.completed]);
+
+      expect(replay).toEqual({
+        acceptedEvents: [],
+        insertedInputIndexes: [],
+        replayedInputIndexes: [0, 1],
+        skippedTurnUnstartedInputIndexes: [],
+      });
+      expect(next.acceptedEvents).toEqual([
+        { threadId: thread.id, sequence: 3 },
+      ]);
+      expect(storedRows(db, thread.id).map((row) => row.type)).toEqual([
+        "turn/started",
+        "item/agentMessage/delta",
+        "turn/completed",
+      ]);
+    });
+
+    it("stores equal deltas with distinct ids as two rows", () => {
+      const { db, thread } = setup();
+      const turn = identifiedTurnInputs(thread.id, "turn_id_equal");
+
+      const result = append(db, [
+        turn.started,
+        turn.delta("evt_delta_first", "Echo\n"),
+        turn.delta("evt_delta_second", "Echo\n"),
+      ]);
+
+      expect(result.insertedInputIndexes).toEqual([0, 1, 2]);
+      expect(result.replayedInputIndexes).toEqual([]);
+      expect(
+        listEvents(db, { threadId: thread.id })
+          .filter((event) => event.type === "item/agentMessage/delta")
+          .map((event) => event.id),
+      ).toEqual(["evt_delta_first", "evt_delta_second"]);
+    });
+
+    it("inserts the new members of a batch that also replays committed ones", () => {
+      const { db, thread } = setup();
+      const turn = identifiedTurnInputs(thread.id, "turn_id_mixed");
+      append(db, [turn.started, turn.delta("evt_mixed_a", "one")]);
+
+      const result = append(db, [
+        turn.started,
+        turn.delta("evt_mixed_a", "one"),
+        turn.delta("evt_mixed_b", "two"),
+        turn.completed,
+      ]);
+
+      expect(result).toEqual({
+        acceptedEvents: [
+          { threadId: thread.id, sequence: 3 },
+          { threadId: thread.id, sequence: 4 },
+        ],
+        insertedInputIndexes: [2, 3],
+        replayedInputIndexes: [0, 1],
+        skippedTurnUnstartedInputIndexes: [],
+      });
+    });
+
+    it("stores an id repeated inside one call once", () => {
+      const { db, thread } = setup();
+      const turn = identifiedTurnInputs(thread.id, "turn_id_twice");
+
+      const result = append(db, [
+        turn.started,
+        turn.delta("evt_twice", "Echo"),
+        turn.delta("evt_twice", "Echo"),
+        turn.completed,
+      ]);
+
+      expect(result.insertedInputIndexes).toEqual([0, 1, 3]);
+      expect(result.replayedInputIndexes).toEqual([2]);
+      expect(result.acceptedEvents.map((event) => event.sequence)).toEqual([
+        1, 2, 3,
+      ]);
+    });
+
+    it("treats identified inputs before a stored receipt in the same thread as replays", () => {
+      const { db, project, thread } = setup();
+      const other = createThread(db, noopNotifier, {
+        status: "idle",
+        projectId: project.id,
+        providerId: "codex",
+      });
+      const turn = identifiedTurnInputs(thread.id, "turn_id_prefix");
+      const otherTurn = identifiedTurnInputs(other.id, "turn_id_other");
+      append(db, [turn.started, turn.completed]);
+      append(db, [otherTurn.started]);
+      const idless = { ...turn.delta("unused", "idless") };
+      delete idless.id;
+
+      const result = append(db, [
+        otherTurn.delta("evt_other_new", "other"),
+        turn.delta("evt_prefix_missing", "pruned"),
+        idless,
+        turn.completed,
+        turn.delta("evt_prefix_after", "after"),
+      ]);
+
+      expect(result.replayedInputIndexes).toEqual([1, 3]);
+      expect(result.insertedInputIndexes).toEqual([0, 2, 4]);
+    });
+
+    it("re-inserts nothing when a pruned batch of resolved deltas is retried", () => {
+      const { db, thread } = setup();
+      const turn = identifiedTurnInputs(thread.id, "turn_id_pruned");
+      const batch = [
+        turn.started,
+        turn.delta("evt_pruned_1", "Echo"),
+        turn.delta("evt_pruned_2", "\n"),
+        turn.delta("evt_pruned_3", "Echo"),
+        turn.itemCompleted,
+        turn.completed,
+      ];
+      append(db, batch);
+      expect(pruneThreadEvents(db, "resolved-items")).toBeGreaterThan(0);
+      const afterPrune = storedRows(db, thread.id);
+
+      const replay = append(db, batch);
+
+      expect(replay.acceptedEvents).toEqual([]);
+      expect(replay.replayedInputIndexes).toEqual([0, 1, 2, 3, 4, 5]);
+      expect(storedRows(db, thread.id)).toEqual(afterPrune);
+    });
+
+    it("keeps the newer rate-limit snapshot authoritative when a pruned batch is retried", () => {
+      const { db, thread } = setup();
+      const snapshot = (id: string, usedPercent: number) =>
+        ({
+          ...daemonThreadEventFields,
+          threadId: thread.id,
+          id,
+          providerThreadId,
+          type: "provider/rateLimits/updated",
+          data: JSON.stringify({
+            providerThreadId,
+            rateLimits: { providerId: "codex", usedPercent },
+          }),
+        }) satisfies AppendDaemonEventInput;
+      const batch = [snapshot("evt_rate_old", 10), snapshot("evt_rate_new", 20)];
+      append(db, batch);
+      expect(pruneThreadEvents(db, "rate-limits")).toBe(1);
+
+      const replay = append(db, batch);
+
+      expect(replay.acceptedEvents).toEqual([]);
+      expect(replay.replayedInputIndexes).toEqual([0, 1]);
+      expect(storedRows(db, thread.id)).toEqual([
+        {
+          id: "evt_rate_new",
+          sequence: 2,
+          type: "provider/rateLimits/updated",
+        },
+      ]);
+    });
+  });
+
+  it("finds only a stamped root completion through the sequence with the same turn and status", () => {
+    const { db, thread } = setup();
+    const turnFields = {
+      threadId: thread.id,
+      ...createTurnEventFields({ turnId: "turn_stamped" }),
+      environmentId: null,
+      providerThreadId: "provider_thr_stamped",
+    };
+    const completion = (status: string) => ({
+      ...turnFields,
+      type: "turn/completed" as const,
+      data: JSON.stringify({
+        providerThreadId: "provider_thr_stamped",
+        status,
+      }),
+    });
+    db.transaction(
+      (tx) =>
+        appendDaemonEventsInTransaction(tx, [
+          {
+            ...turnFields,
+            type: "turn/started",
+            data: JSON.stringify({ providerThreadId: "provider_thr_stamped" }),
+          },
+          completion("completed"),
+          completion("interrupted"),
+          completion("completed"),
+        ]),
+      { behavior: "immediate" },
+    );
+    const handled = (args: {
+      throughSequence: number;
+      status?: string;
+      turnId?: string;
+    }) =>
+      hasHandledRootTurnCompletion(db, {
+        threadId: thread.id,
+        turnId: args.turnId ?? "turn_stamped",
+        status: args.status ?? "completed",
+        throughSequence: args.throughSequence,
+      });
+
+    expect(handled({ throughSequence: 4 })).toBe(false);
+
+    markTurnCompletionParentNoticeHandled(db, {
+      threadId: thread.id,
+      sequence: 2,
+    });
+
+    expect({
+      later: handled({ throughSequence: 4 }),
+      itself: handled({ throughSequence: 2 }),
+      earlier: handled({ throughSequence: 1 }),
+      otherStatus: handled({ throughSequence: 4, status: "interrupted" }),
+      otherTurn: handled({ throughSequence: 4, turnId: "turn_other" }),
+    }).toEqual({
+      later: true,
+      itself: true,
+      earlier: false,
+      otherStatus: false,
+      otherTurn: false,
+    });
+    const [stamped] = listEvents(db, { threadId: thread.id }).filter(
+      (row) => row.sequence === 2,
+    );
+    if (stamped === undefined) throw new Error("Missing stamped completion");
+    expect(JSON.parse(stamped.data)).toMatchObject({
+      parentNoticeHandled: true,
+    });
+    expect(
+      parseStoredThreadEvent({
+        ...stamped,
+        scope: turnScope("turn_stamped"),
+        data: JSON.parse(stamped.data),
+      }),
+    ).not.toHaveProperty("parentNoticeHandled");
+  });
+
+  it("reads the lifecycle stamp of only the stamped rows and hides it from parsed events", () => {
+    const { db, thread } = setup();
+    const turnFields = {
+      threadId: thread.id,
+      ...createTurnEventFields({ turnId: "turn_applied" }),
+      environmentId: null,
+      providerThreadId: "provider_thr_applied",
+    };
+    db.transaction(
+      (tx) =>
+        appendDaemonEventsInTransaction(tx, [
+          {
+            ...turnFields,
+            id: "evt_applied_start",
+            type: "turn/started",
+            data: JSON.stringify({ providerThreadId: "provider_thr_applied" }),
+          },
+          {
+            ...turnFields,
+            id: "evt_applied_error",
+            type: "system/error",
+            data: JSON.stringify({
+              code: "provider_process_exited",
+              message: "exited",
+            }),
+          },
+          {
+            ...turnFields,
+            id: "evt_applied_completion",
+            type: "turn/completed",
+            data: JSON.stringify({
+              providerThreadId: "provider_thr_applied",
+              status: "completed",
+            }),
+          },
+        ]),
+      { behavior: "immediate" },
+    );
+    const applied = (sequence: number) =>
+      isEventLifecycleApplied(db, { threadId: thread.id, sequence });
+
+    expect([applied(1), applied(2), applied(3)]).toEqual([false, false, false]);
+
+    markEventLifecycleApplied(db, { threadId: thread.id, sequence: 1 });
+    markEventLifecycleApplied(db, { threadId: thread.id, sequence: 3 });
+
+    expect({
+      start: applied(1),
+      error: applied(2),
+      completion: applied(3),
+      otherThread: isEventLifecycleApplied(db, {
+        threadId: "thr_other",
+        sequence: 3,
+      }),
+    }).toEqual({ start: true, error: false, completion: true, otherThread: false });
+    const stampedRows = listEvents(db, { threadId: thread.id }).filter(
+      (row) => row.sequence === 1 || row.sequence === 3,
+    );
+    expect(stampedRows.map((row) => row.type)).toEqual([
+      "turn/started",
+      "turn/completed",
+    ]);
+    for (const stamped of stampedRows) {
+      expect(JSON.parse(stamped.data)).toMatchObject({ lifecycleApplied: true });
+      expect(
+        parseStoredThreadEvent({
+          ...stamped,
+          scope: turnScope("turn_applied"),
+          data: JSON.parse(stamped.data),
+        }),
+      ).not.toHaveProperty("lifecycleApplied");
+    }
   });
 
   it("rejects daemon turn-scoped events before turn/started is stored", () => {

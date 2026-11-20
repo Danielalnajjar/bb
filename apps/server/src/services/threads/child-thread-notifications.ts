@@ -2,17 +2,27 @@ import {
   childThreadOutcomeSchema,
   threadEventTurnStatusSchema,
   type PromptInput,
+  type ResolvedThreadExecutionOptions,
   type SystemMessageSubject,
   type ThreadEventTurnStatus,
   type ChildThreadOutcome,
 } from "@bb/domain";
-import { getThread, listActiveBackgroundTaskCountsByThreadIds } from "@bb/db";
+import {
+  getThread,
+  getTurnFinalAgentMessageEventRow,
+  listActiveBackgroundTaskCountsByThreadIds,
+  type DbTransaction,
+} from "@bb/db";
 import { renderTemplate } from "@bb/templates";
 import { z } from "zod";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import { requestQueuedMessageDispatchAt } from "./queued-message-dispatch.js";
 import { buildExecutionOptions } from "./thread-commands.js";
-import { postCoalescedSystemNotice } from "./coalesced-system-notices.js";
+import {
+  announceCoalescedSystemNoticeWrite,
+  writeCoalescedSystemNoticeInTransaction,
+  type CoalescedNoticeWrite,
+} from "./coalesced-system-notices.js";
 import {
   buildParentSystemInputFromTemplateSlot,
   buildParentSystemThreadMention,
@@ -27,7 +37,7 @@ import {
   childOutcomeSystemMessageKind,
   systemMessageKindForTemplate,
 } from "./system-message-kind.js";
-import { getTurnFinalOutput } from "./thread-data.js";
+import { parseStoredEvent } from "./thread-data.js";
 
 export type ChildThreadNotificationSource = ParentSystemThreadMentionSource;
 
@@ -72,7 +82,7 @@ interface BuildChildThreadNeedsAttentionInputArgs {
   childThread: ChildThreadNotificationSource;
 }
 
-interface QueueChildThreadTurnNotificationArgs {
+export interface QueueChildThreadTurnNotificationArgs {
   childThread: ChildThreadNotificationSource;
   parentThreadId: string;
   turnStatus: ThreadEventTurnStatus;
@@ -248,23 +258,33 @@ function buildChildThreadBatchStatusLineSegments(
 }
 
 function getChildThreadCompletionOutput(
-  deps: LoggedPendingInteractionWorkSessionDeps,
+  tx: DbTransaction,
   args: QueueChildThreadTurnNotificationArgs,
 ): string | null {
   if (args.turnStatus !== "completed" || args.turnId === null) {
     return null;
   }
-  return getTurnFinalOutput(deps.db, {
+  const row = getTurnFinalAgentMessageEventRow(tx, {
     threadId: args.childThread.id,
     turnId: args.turnId,
   });
+  if (row === null) return null;
+  const event = parseStoredEvent(row);
+  if (
+    event.type === "item/completed" &&
+    event.item.type === "agentMessage" &&
+    event.item.text.trim().length > 0
+  ) {
+    return event.item.text;
+  }
+  return null;
 }
 
 function getChildThreadActiveWorkflowCount(
-  deps: LoggedPendingInteractionWorkSessionDeps,
+  tx: DbTransaction,
   args: QueueChildThreadTurnNotificationArgs,
 ): number {
-  const [activity] = listActiveBackgroundTaskCountsByThreadIds(deps.db, {
+  const [activity] = listActiveBackgroundTaskCountsByThreadIds(tx, {
     threadIds: [args.childThread.id],
   });
   return activity?.activeWorkflowCount ?? 0;
@@ -423,33 +443,31 @@ function mergeChildThreadTurnNotificationItem(
   );
 }
 
-async function queueChildThreadTurnNotificationBatchItem(
-  deps: LoggedPendingInteractionWorkSessionDeps,
+export function writeChildThreadTurnNotificationInTransaction(
+  tx: DbTransaction,
   args: QueueChildThreadTurnNotificationArgs,
-): Promise<void> {
-  const parentThread = getThread(deps.db, args.parentThreadId);
+  execution: ResolvedThreadExecutionOptions,
+): CoalescedNoticeWrite {
+  const parentThread = getThread(tx, args.parentThreadId);
   if (
     !parentThread ||
     parentThread.archivedAt !== null ||
     parentThread.deletedAt !== null
   ) {
-    return;
+    return { kind: "none" };
   }
   const item: ChildThreadTurnNotificationBatchItem = {
-    activeWorkflowCount: getChildThreadActiveWorkflowCount(deps, args),
+    activeWorkflowCount: getChildThreadActiveWorkflowCount(tx, args),
     childThread: args.childThread,
-    terminalOutput: getChildThreadCompletionOutput(deps, args),
+    terminalOutput: getChildThreadCompletionOutput(tx, args),
     turnStatus: args.turnStatus,
     ...(args.failureContext ? { failureContext: args.failureContext } : {}),
     ...(args.interruption ? { interruption: args.interruption } : {}),
   };
-  const execution = await buildExecutionOptions(
-    deps,
-    {},
-    { threadId: parentThread.id },
-  );
-  const row = postCoalescedSystemNotice<ChildThreadTurnNotificationBatchItem[]>(
-    deps,
+  return writeCoalescedSystemNoticeInTransaction<
+    ChildThreadTurnNotificationBatchItem[]
+  >(
+    tx,
     {
       coalesceKey: CHILD_THREAD_TURN_NOTIFICATION_COALESCE_KEY,
       execution,
@@ -473,10 +491,43 @@ async function queueChildThreadTurnNotificationBatchItem(
       threadId: parentThread.id,
       windowMs: CHILD_THREAD_TURN_NOTIFICATION_BATCH_DELAY_MS,
     },
+    Date.now(),
   );
+}
+
+export function announceChildThreadTurnNotificationWrite(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  parentThreadId: string,
+  write: CoalescedNoticeWrite,
+): void {
+  const row = announceCoalescedSystemNoticeWrite(deps, parentThreadId, write);
   if (row !== null && row.state === "scheduled" && row.sendAt !== null) {
     requestQueuedMessageDispatchAt(deps, row.sendAt);
   }
+}
+
+async function queueChildThreadTurnNotificationBatchItem(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  args: QueueChildThreadTurnNotificationArgs,
+): Promise<void> {
+  const parentThread = getThread(deps.db, args.parentThreadId);
+  if (
+    !parentThread ||
+    parentThread.archivedAt !== null ||
+    parentThread.deletedAt !== null
+  ) {
+    return;
+  }
+  const execution = await buildExecutionOptions(
+    deps,
+    {},
+    { threadId: parentThread.id },
+  );
+  const write = deps.db.transaction(
+    (tx) => writeChildThreadTurnNotificationInTransaction(tx, args, execution),
+    { behavior: "immediate" },
+  );
+  announceChildThreadTurnNotificationWrite(deps, parentThread.id, write);
 }
 
 export async function queueChildThreadTurnNotificationBestEffort(

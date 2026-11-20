@@ -1,7 +1,14 @@
 import { AbortError } from "p-retry";
 import { describe, expect, it, vi } from "vitest";
-import type { PendingInteractionCreate } from "@bb/domain";
+import { z } from "zod";
+import {
+  threadEventSchema,
+  threadScope,
+  type PendingInteractionCreate,
+} from "@bb/domain";
+import type { HostDaemonEventEnvelope } from "@bb/host-daemon-contract";
 import { HOST_ARTIFACT_MAX_BYTES } from "@bb/host-daemon-contract/protocol";
+import { createEventSink } from "./event-sink.js";
 import {
   createServerClient,
   ServerResponseError,
@@ -496,6 +503,353 @@ describe("createServerClient", () => {
         },
       ],
       rejectedEvents: [],
+    });
+  });
+
+  describe("event occurrence ids", () => {
+    const legacyEventBatchRequestSchema = z
+      .object({
+        sessionId: z.string().min(1),
+        eventGroups: z.array(
+          z
+            .object({
+              threadId: z.string().min(1),
+              events: z.array(threadEventSchema).min(1),
+            })
+            .strict(),
+        ),
+      })
+      .strict();
+
+    interface EventPostBody {
+      sessionId: string;
+      eventGroups: {
+        threadId: string;
+        events: { message?: string }[];
+        eventIds?: string[];
+      }[];
+    }
+
+    interface EventServerArgs {
+      openHeaders: HeadersInit[];
+      respondToEvents: (body: EventPostBody, index: number) => Response;
+    }
+
+    function systemError(message: string) {
+      return {
+        type: "system/error",
+        threadId: "thr_123",
+        scope: threadScope(),
+        message,
+      } as const;
+    }
+
+    const identifiedEvents: HostDaemonEventEnvelope[] = [
+      {
+        threadId: "thr_123",
+        event: systemError("one"),
+        eventId: "0b8e4c1f-3a2d-4f6e-9b7a-1c2d3e4f5a6b",
+      },
+      {
+        threadId: "thr_123",
+        event: systemError("two"),
+        eventId: "7d6c5b4a-3f2e-4d1c-8b0a-9f8e7d6c5b4a",
+      },
+    ];
+
+    function acceptAll(body: EventPostBody): Response {
+      return Response.json({
+        acceptedEvents: body.eventGroups
+          .flatMap((group) => group.events.map(() => group.threadId))
+          .map((threadId, eventIndex) => ({
+            eventIndex,
+            sequence: eventIndex + 1,
+            threadId,
+          })),
+        rejectedEvents: [],
+      });
+    }
+
+    function rejectRequest(code: string, status: number): Response {
+      return Response.json(
+        { code, message: `${code} rejection`, retryable: false },
+        { status },
+      );
+    }
+
+    function createEventServer(args: EventServerArgs) {
+      const eventBodies: EventPostBody[] = [];
+      let opens = 0;
+      const fetchFn = vi.fn<FetchFn>(async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/internal/session/open") {
+          const openHeaders = args.openHeaders[opens] ?? {};
+          opens += 1;
+          return Response.json(
+            {
+              sessionId: "session-1",
+              machineEnvironment: { revision: 0, entries: [] },
+              idleProviderSessionTimeoutMinutes: 30,
+              agentCpuPriority: false,
+              heartbeatIntervalMs: 5_000,
+              leaseTimeoutMs: 30_000,
+              reconnectGraceMs: 30_000,
+              endedInteractiveRequests: [],
+            },
+            { headers: openHeaders, status: 201 },
+          );
+        }
+        expect(url.pathname).toBe("/internal/session/events");
+        const body: EventPostBody = JSON.parse(String(init?.body));
+        eventBodies.push(body);
+        return args.respondToEvents(body, eventBodies.length - 1);
+      });
+      const client = createServerClient({
+        fetchFn,
+        getSessionId: () => "session-1",
+        hostKey: "host-key",
+        logger: createLogger(),
+        serverUrl: "https://bb.example.test",
+      });
+      return { client, eventBodies };
+    }
+
+    function openSession(client: ReturnType<typeof createServerClient>) {
+      return client.openSession({
+        hostId: "host-1",
+        hostName: "Host",
+        dataDir: "/tmp/bb",
+        instanceId: "instance-1",
+        localApiPort: null,
+        turnCommandThreadIds: [],
+        activeThreads: [],
+        openThreadWork: [],
+        undeliveredEventThreadIds: [],
+        loadedEnvironments: [],
+      });
+    }
+
+    function postedShape(body: EventPostBody | undefined) {
+      return body?.eventGroups.map((group) => ({
+        messages: group.events.map((event) => event.message),
+        eventIds: group.eventIds,
+      }));
+    }
+
+    const identifiedIds = identifiedEvents.map((envelope) => envelope.eventId);
+
+    it("sends event ids only after a session open that advertises them", async () => {
+      const { client, eventBodies } = createEventServer({
+        openHeaders: [{}, { "x-bb-event-ids": "1" }, {}],
+        respondToEvents: acceptAll,
+      });
+
+      for (let open = 0; open < 3; open += 1) {
+        await openSession(client);
+        await client.postEvents(identifiedEvents);
+      }
+
+      expect(eventBodies.map(postedShape)).toEqual([
+        [{ messages: ["one", "two"], eventIds: undefined }],
+        [{ messages: ["one", "two"], eventIds: identifiedIds }],
+        [{ messages: ["one", "two"], eventIds: undefined }],
+      ]);
+      expect(eventBodies[0]?.eventGroups[0]).not.toHaveProperty("eventIds");
+      expect(eventBodies[2]?.eventGroups[0]).not.toHaveProperty("eventIds");
+    });
+
+    it("resends the unsplit batch without ids when the server uses the id-less strict schema", async () => {
+      const stored: string[] = [];
+      const { client, eventBodies } = createEventServer({
+        openHeaders: [{ "x-bb-event-ids": "1" }],
+        respondToEvents: (body) => {
+          const parsed = legacyEventBatchRequestSchema.safeParse(body);
+          if (!parsed.success) return rejectRequest("invalid_request", 400);
+          for (const group of parsed.data.eventGroups) {
+            for (const event of group.events) {
+              if (event.type === "system/error") stored.push(event.message);
+            }
+          }
+          return acceptAll(body);
+        },
+      });
+      const sink = createEventSink({
+        isSessionOpen: () => true,
+        logger: createLogger(),
+        postEvents: client.postEvents,
+      });
+
+      try {
+        await openSession(client);
+        sink.emit({ threadId: "thr_123", event: systemError("one") });
+        sink.emit({ threadId: "thr_123", event: systemError("two") });
+        await sink.flush();
+
+        expect(stored).toEqual(["one", "two"]);
+        expect(sink.listUndeliveredThreadIds()).toEqual([]);
+        expect(eventBodies.map(postedShape)).toEqual([
+          [
+            {
+              messages: ["one", "two"],
+              eventIds: [expect.any(String), expect.any(String)],
+            },
+          ],
+          [{ messages: ["one", "two"], eventIds: undefined }],
+        ]);
+        expect(eventBodies[1]?.eventGroups[0]).not.toHaveProperty("eventIds");
+
+        sink.emit({ threadId: "thr_123", event: systemError("three") });
+        await sink.flush();
+        expect(stored).toEqual(["one", "two", "three"]);
+        expect(eventBodies).toHaveLength(3);
+        expect(postedShape(eventBodies[2])).toEqual([
+          { messages: ["three"], eventIds: undefined },
+        ]);
+      } finally {
+        await sink.dispose();
+      }
+    });
+
+    it("hands an inactive session on the id-less resend to session handling without splitting", async () => {
+      const sessionErrors: unknown[] = [];
+      const { client, eventBodies } = createEventServer({
+        openHeaders: [{ "x-bb-event-ids": "1" }],
+        respondToEvents: (body, index) => {
+          if (index === 0) return rejectRequest("invalid_request", 400);
+          if (index === 1) return rejectRequest("inactive_session", 401);
+          return acceptAll(body);
+        },
+      });
+      const sink = createEventSink({
+        isSessionOpen: () => true,
+        logger: createLogger(),
+        postEvents: async (events) => {
+          try {
+            return await client.postEvents(events);
+          } catch (error) {
+            sessionErrors.push(error);
+            throw error;
+          }
+        },
+      });
+
+      try {
+        await openSession(client);
+        sink.emit({ threadId: "thr_123", event: systemError("one") });
+        sink.emit({ threadId: "thr_123", event: systemError("two") });
+        await sink.flush();
+
+        expect(sessionErrors).toHaveLength(1);
+        expect(sessionErrors[0]).toBeInstanceOf(ServerResponseError);
+        expect(sessionErrors[0]).toMatchObject({
+          code: "inactive_session",
+          status: 401,
+        });
+        expect(sink.listUndeliveredThreadIds()).toEqual(["thr_123"]);
+
+        await sink.flush();
+
+        expect(sink.listUndeliveredThreadIds()).toEqual([]);
+        expect(eventBodies.map(postedShape)).toEqual([
+          [
+            {
+              messages: ["one", "two"],
+              eventIds: [expect.any(String), expect.any(String)],
+            },
+          ],
+          [{ messages: ["one", "two"], eventIds: undefined }],
+          [
+            {
+              messages: ["one", "two"],
+              eventIds: eventBodies[0]?.eventGroups[0]?.eventIds,
+            },
+          ],
+        ]);
+      } finally {
+        await sink.dispose();
+      }
+    });
+
+    it("retries a committed batch with the same event ids after a 5xx response", async () => {
+      const storedIds = new Set<string>();
+      const { client, eventBodies } = createEventServer({
+        openHeaders: [{ "x-bb-event-ids": "1" }],
+        respondToEvents: (body, index) => {
+          for (const group of body.eventGroups) {
+            for (const eventId of group.eventIds ?? []) storedIds.add(eventId);
+          }
+          if (index === 0) {
+            return new Response("Bad Gateway", { status: 502 });
+          }
+          return acceptAll(body);
+        },
+      });
+      const sink = createEventSink({
+        isSessionOpen: () => true,
+        logger: createLogger(),
+        postEvents: client.postEvents,
+      });
+
+      try {
+        await openSession(client);
+        sink.emit({ threadId: "thr_123", event: systemError("one") });
+        sink.emit({ threadId: "thr_123", event: systemError("two") });
+        await sink.flush();
+
+        expect(eventBodies).toHaveLength(1);
+        expect(sink.listUndeliveredThreadIds()).toEqual(["thr_123"]);
+
+        await sink.flush();
+
+        expect(sink.listUndeliveredThreadIds()).toEqual([]);
+        const firstIds = eventBodies[0]?.eventGroups[0]?.eventIds;
+        expect(firstIds).toEqual([expect.any(String), expect.any(String)]);
+        expect(eventBodies.map(postedShape)).toEqual([
+          [{ messages: ["one", "two"], eventIds: firstIds }],
+          [{ messages: ["one", "two"], eventIds: firstIds }],
+        ]);
+        expect(storedIds.size).toBe(2);
+
+        sink.emit({ threadId: "thr_123", event: systemError("three") });
+        await sink.flush();
+
+        expect(eventBodies).toHaveLength(3);
+        expect(postedShape(eventBodies[2])).toEqual([
+          { messages: ["three"], eventIds: [expect.any(String)] },
+        ]);
+      } finally {
+        await sink.dispose();
+      }
+    });
+
+    it("keeps event ids after a validation rejection unrelated to them", async () => {
+      const { client, eventBodies } = createEventServer({
+        openHeaders: [{ "x-bb-event-ids": "1" }],
+        respondToEvents: (body) =>
+          body.eventGroups.some((group) =>
+            group.events.some((event) => event.message === "malformed"),
+          )
+            ? rejectRequest("invalid_request", 400)
+            : acceptAll(body),
+      });
+      const malformed: HostDaemonEventEnvelope = {
+        threadId: "thr_123",
+        event: systemError("malformed"),
+        eventId: "c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f",
+      };
+
+      await openSession(client);
+      await expect(client.postEvents([malformed])).rejects.toMatchObject({
+        code: "invalid_request",
+        status: 400,
+      });
+      await client.postEvents(identifiedEvents);
+
+      expect(eventBodies.map(postedShape)).toEqual([
+        [{ messages: ["malformed"], eventIds: [malformed.eventId] }],
+        [{ messages: ["malformed"], eventIds: undefined }],
+        [{ messages: ["one", "two"], eventIds: identifiedIds }],
+      ]);
     });
   });
 
