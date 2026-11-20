@@ -24,6 +24,10 @@ import {
 } from "../../src/services/threads/queue-drain-failure.js";
 import { runQueuedMessageDispatch } from "../../src/services/threads/queued-message-dispatch.js";
 import { toThreadQueuedMessage } from "../../src/services/threads/thread-queued-messages.js";
+import {
+  listQueuedThreadCommands,
+  waitForQueuedCommand,
+} from "../helpers/commands.js";
 import { textInput } from "../helpers/prompt-input.js";
 import {
   seedEnvironment,
@@ -160,14 +164,50 @@ async function seedNoticeBlockedBySiblingClaim(harness: TestAppHarness) {
   });
   expect(turnRequests(harness, thread.id)).toHaveLength(turnsBefore);
 
-  return { control, notice, sibling, siblingSendAt, thread, turnsBefore };
+  return {
+    control,
+    host,
+    notice,
+    sibling,
+    siblingSendAt,
+    thread,
+    turnsBefore,
+  };
 }
 
-function expectNoticeRecovered(
+async function expectTurnSubmittedTo(
+  harness: TestAppHarness,
+  args: { hostId: string; text: string; threadId: string },
+) {
+  const submitted = await waitForQueuedCommand(
+    harness,
+    (queued) =>
+      queued.command.type === "turn.submit" &&
+      queued.command.threadId === args.threadId,
+  );
+  expect(
+    listQueuedThreadCommands(harness, "turn.submit", args.threadId),
+  ).toHaveLength(1);
+  expect(submitted.row.hostId).toBe(args.hostId);
+  if (submitted.command.type !== "turn.submit") {
+    throw new Error("the captured command is not a turn submission");
+  }
+  expect(JSON.stringify(submitted.command.input)).toContain(args.text);
+}
+
+async function expectNoticeRecovered(
   harness: TestAppHarness,
   seeded: Awaited<ReturnType<typeof seedNoticeBlockedBySiblingClaim>>,
 ) {
   expect(getQueuedThreadMessage(harness.db, seeded.notice.id)).toBeNull();
+  await expectTurnSubmittedTo(harness, {
+    hostId: seeded.host.id,
+    text: NOTICE_TEXT,
+    threadId: seeded.thread.id,
+  });
+  expect(
+    listQueuedThreadCommands(harness, "turn.submit", seeded.control.thread.id),
+  ).toEqual([]);
   const requests = turnRequests(harness, seeded.thread.id);
   expect(requests).toHaveLength(seeded.turnsBefore + 1);
   expect(requests.at(-1)!.initiator).toBe("system");
@@ -251,7 +291,7 @@ describe("host-connected queue dispatch", () => {
         kind: "idle-recovery",
         now: recoveryAt,
       });
-      expectNoticeRecovered(harness, seeded);
+      await expectNoticeRecovered(harness, seeded);
 
       await runQueuedMessageDispatch(harness.deps, {
         kind: "idle-recovery",
@@ -287,6 +327,11 @@ describe("host-connected queue dispatch", () => {
       expect(JSON.stringify(controlRequests.at(-1)!.input)).toContain(
         "Capture the Safari trace",
       );
+      await expectTurnSubmittedTo(harness, {
+        hostId: seeded.control.host.id,
+        text: "Capture the Safari trace",
+        threadId: seeded.control.thread.id,
+      });
 
       await runQueuedMessageDispatch(harness.deps, {
         kind: "idle-recovery",
@@ -324,7 +369,7 @@ describe("host-connected queue dispatch", () => {
         Date.now() + 6 * 60 * 1000,
       );
 
-      expectNoticeRecovered(harness, seeded);
+      await expectNoticeRecovered(harness, seeded);
     });
   });
 });
