@@ -2592,9 +2592,10 @@ export function hasLiveQueuedRetry(
   );
 }
 
-export function getUndatedPluginHeldRestartResume(
+export function getDueWaitingRestartResume(
   db: DbQueryConnection,
   threadId: string,
+  now: number,
 ): { threadId: string; id: string } | undefined {
   return db
     .select({
@@ -2608,8 +2609,11 @@ export function getUndatedPluginHeldRestartResume(
         eq(queuedThreadMessages.payloadKind, "retry"),
         eq(queuedThreadMessages.retryReason, RESTART_RESUME_RETRY_REASON),
         eq(queuedThreadMessages.state, "waiting"),
-        isNotNull(queuedThreadMessages.waitHolder),
-        isNull(queuedThreadMessages.sendAt),
+        notSupersededQueuedThreadMessage(),
+        or(
+          isNull(queuedThreadMessages.sendAt),
+          lte(queuedThreadMessages.sendAt, now),
+        ),
       ),
     )
     .orderBy(asc(queuedThreadMessages.sortKey), asc(queuedThreadMessages.id))

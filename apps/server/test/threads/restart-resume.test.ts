@@ -6,6 +6,7 @@ import {
   getLatestThreadSequence,
   getThread,
   listQueuedThreadMessages,
+  listThreadIdsWithHostOfflineQueueWaits,
   getAppSettings,
   insertThreadPluginMetadata,
   setAppSettings,
@@ -278,14 +279,14 @@ let instanceCounter = 0;
 async function restartDaemon(
   harness: TestAppHarness,
   fixture: HostFixture,
+  instanceId = `instance-restarted-${++instanceCounter}`,
 ): Promise<string> {
-  instanceCounter += 1;
   const response = await harness.app.request("/internal/session/open", {
     method: "POST",
     headers: internalAuthHeaders(harness, { hostId: fixture.host.id }),
     body: JSON.stringify({
       hostId: fixture.host.id,
-      instanceId: `instance-restarted-${instanceCounter}`,
+      instanceId,
       hostName: "Test Host",
       hasMachineCredential: false,
       platform: "darwin",
@@ -808,6 +809,60 @@ describe("resuming threads after a restart", () => {
     });
   });
 
+  it("reoffers an offline restart retry on release after a held reconnect", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    await withTestHarness(async (harness) => {
+      continueAfterRestarts(harness, true);
+      const fixture = seedHostWithProject(harness);
+      const { thread, requestId } = seedRunningThread(harness, fixture);
+      const instanceId = "replacement-daemon";
+      vi.setSystemTime(Date.now() + 1);
+      const sessionId = await restartDaemon(harness, fixture, instanceId);
+      const [retry] = listQueuedThreadMessages(harness.db, thread.id);
+      if (retry?.sendAt == null)
+        throw new Error("Expected a scheduled restart retry");
+      expect(retry.retryOfTurnRequestId).toBe(requestId);
+
+      handleDaemonSocketClosed(harness.deps, { sessionId });
+      expect(harness.hub.hasDaemonForHost(fixture.host.id)).toBe(false);
+      vi.setSystemTime(retry.sendAt);
+      await runDueWake(harness);
+      const parked = getQueuedThreadMessage(harness.db, retry.id);
+      expect(parked).toMatchObject({
+        state: "waiting",
+        sendAt: null,
+        claimToken: null,
+        retryOfTurnRequestId: requestId,
+      });
+      expect(queue(harness, thread.id)).toMatchObject([
+        { id: retry.id, waitingOn: { kind: "host-offline" } },
+      ]);
+      expect(
+        listThreadIdsWithHostOfflineQueueWaits(harness.db, fixture.host.id),
+      ).toEqual([thread.id]);
+
+      await patchRestartResumeMetadata(harness, thread.id, {
+        set: { [RESTART_RESUME_METADATA_KEY]: { hold: true } },
+      });
+      const offers: string[][] = [];
+      installDispatchHook((context) => {
+        offers.push(context.queuedMessages.map(({ id }) => id));
+        return { action: "proceed" };
+      });
+      await restartDaemon(harness, fixture, instanceId);
+      expect(harness.hub.hasDaemonForHost(fixture.host.id)).toBe(true);
+      expect(getQueuedThreadMessage(harness.db, retry.id)).toEqual(parked);
+      expect(turnRequests(harness, thread.id)).toHaveLength(1);
+      expect(offers).toEqual([]);
+
+      await patchRestartResumeMetadata(harness, thread.id, {
+        remove: [RESTART_RESUME_METADATA_KEY],
+      });
+      await expectRestartDelivered(harness, thread.id, requestId);
+      expect(offers).toEqual([[retry.id]]);
+    });
+  });
+
   it("lets Send now override a restart hold", async () => {
     await withTestHarness(async (harness) => {
       continueAfterRestarts(harness, true);
@@ -879,11 +934,15 @@ describe("resuming threads after a restart", () => {
     });
   });
 
-  it("does not join or alter an existing plugin-held retry for a different turn", async () => {
+  it("reports a normal child interruption without altering its existing retry", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     await withTestHarness(async (harness) => {
       continueAfterRestarts(harness, true);
       const fixture = seedHostWithProject(harness);
-      const { thread } = seedRunningThread(harness, fixture);
+      const parent = seedParentForRestart(harness, fixture);
+      const { thread } = seedRunningThread(harness, fixture, {
+        parentThreadId: parent.id,
+      });
       const existing = createQueuedThreadMessage(harness.db, harness.deps.hub, {
         threadId: thread.id,
         content: textInput("Retry the earlier request"),
@@ -906,8 +965,18 @@ describe("resuming threads after a restart", () => {
         systemNotice: null,
       });
 
+      await vi.advanceTimersByTimeAsync(1);
       await restartDaemon(harness, fixture);
 
+      expect(interruptionErrorDetails(harness, thread.id)).toEqual([
+        "Please retry the thread to continue.",
+      ]);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.waitFor(() =>
+        expect(requestTexts(harness, parent.id).at(-1)).toContain(
+          "was interrupted because its host daemon restarted",
+        ),
+      );
       expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([
         existing,
       ]);

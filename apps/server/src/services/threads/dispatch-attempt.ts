@@ -751,9 +751,7 @@ async function runDispatchAttempt(
       assertPluginHoldNotStopPaused();
       const callerSendAt = payload.sendAt ?? null;
       const notBefore =
-        args.queuePayload.kind === "retry" &&
-        callerSendAt !== null &&
-        callerSendAt > Date.now()
+        callerSendAt !== null && callerSendAt > Date.now()
           ? callerSendAt
           : null;
       const wait = {

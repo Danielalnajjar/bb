@@ -68,6 +68,7 @@ import { replaceStoredProviderModelCatalog } from "../src/data/provider-model-ca
 import { openSession } from "../src/data/sessions.js";
 import { readRestartResumeFacts } from "../src/data/thread-plugin-metadata.js";
 import {
+  getDueWaitingRestartResume,
   listDueScheduledQueuedThreadMessages,
   listRetryableFailedQueuedThreadMessages,
   listQueuedThreadMessagesByWaitHolder,
@@ -433,6 +434,22 @@ describe("slow query index plans", () => {
     expect(details).not.toMatch(/SCAN queued_thread_messages/u);
 
     db.$client.close();
+  });
+
+  it("seeks within a thread's queue for the due waiting restart retry", () => {
+    const { db, thread } = setup();
+    try {
+      const captured = captureStatements(db, () => {
+        getDueWaitingRestartResume(db, thread.id, 1_000);
+      });
+      expect(captured).toHaveLength(1);
+      const details = queryPlanDetails({ db, ...captured[0]! });
+      expect(details).toMatch(
+        /SEARCH queued_thread_messages .*\(thread_id=\?\)/u,
+      );
+    } finally {
+      db.$client.close();
+    }
   });
 
   it("finds retryable failed queued messages through the state retry index", () => {

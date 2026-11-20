@@ -5,6 +5,7 @@ import {
   getAppSettings,
   getThread,
   getUnfinishedCommandItemData,
+  hasLiveQueuedRetry,
   listCommandItemDataByItemIds,
   listOpenBackgroundTaskItemRowsForHost,
   listOwnerStoppedBackgroundTaskRowsForHost,
@@ -258,6 +259,13 @@ export function planRestartResumes(
       deps.logger.info(
         { threadId: id, pluginId: hold.pluginId },
         "Not resuming a thread a plugin holds",
+      );
+      continue;
+    }
+    if (hasLiveQueuedRetry(deps.db, id)) {
+      deps.logger.info(
+        { threadId: id },
+        "Not resuming a thread that already has a queued retry",
       );
       continue;
     }

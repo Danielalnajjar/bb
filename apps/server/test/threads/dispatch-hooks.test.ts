@@ -8,8 +8,10 @@ import {
 } from "@bb/db";
 import {
   turnRequestEventDataSchema,
+  turnScope,
   type ThreadQueuedMessage,
 } from "@bb/domain";
+import { groupHostDaemonEvents } from "@bb/host-daemon-contract";
 import { createDeferredPromise } from "@bb/test-helpers";
 import type { StartedOnBehalfOf } from "@bb/domain";
 import type {
@@ -39,6 +41,7 @@ import { createClientTurnRequestId } from "../../src/services/threads/thread-eve
 import { toThreadQueuedMessage } from "../../src/services/threads/thread-queued-messages.js";
 import { textInput } from "../helpers/prompt-input.js";
 import {
+  internalAuthHeaders,
   listQueuedThreadCommands,
   reportQueuedCommandSuccess,
   waitForQueuedCommand,
@@ -48,6 +51,7 @@ import {
   seedHostSession,
   seedProjectWithSource,
   seedThread,
+  seedThreadFixture,
   seedThreadRuntimeState,
   seedTurnStarted,
 } from "../helpers/seed.js";
@@ -253,7 +257,123 @@ describe("message.dispatch hook context", () => {
         pluginId: "drafts",
         reason: "Draft",
       });
-      expect(onlyQueuedRow(harness, thread.id).sendAt).toBeNull();
+      expect(onlyQueuedRow(harness, thread.id).sendAt).toBe(sendAt);
+    });
+  });
+
+  it("keeps a plugin-held follow-up scheduled when the active turn ends early", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setImmediate", "clearImmediate"] });
+    await withTestHarness(async (harness) => {
+      const { environment, host, session, thread } = seedThreadFixture(
+        harness,
+        { thread: { status: "active" } },
+      );
+      const providerThreadId = `provider-${thread.id}`;
+      const turnId = `turn-${thread.id}`;
+      seedThreadRuntimeState(harness.deps, {
+        environmentId: environment.id,
+        providerThreadId,
+        threadId: thread.id,
+      });
+      seedTurnStarted(harness.deps, {
+        environmentId: environment.id,
+        providerThreadId,
+        threadId: thread.id,
+        turnId,
+      });
+      const offers: { status: string; queuedIds: string[] }[] = [];
+      installHooks({
+        "message.dispatch": [
+          {
+            pluginId: "limiter",
+            handler: (context) => {
+              offers.push({
+                status: context.thread.status,
+                queuedIds: context.queuedMessages.map(({ id }) => id),
+              });
+              return context.thread.status === "active"
+                ? { action: "wait", reason: "Waiting for idle" }
+                : { action: "proceed" };
+            },
+          },
+        ],
+      });
+      const sendAt = Date.now() + 60_000;
+      const input = textInput("Run the scheduled follow-up");
+      const sent = await harness.app.request(
+        `/api/v1/threads/${thread.id}/send`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ input, mode: "queue-if-active", sendAt }),
+        },
+      );
+      expect(sent.status).toBe(200);
+      expect(await sent.json()).toMatchObject({ delivery: "queued" });
+      const [row] = listQueuedThreadMessages(harness.db, thread.id);
+      expect(row).toMatchObject({ waitHolder: "plugin:limiter" });
+      if (row === undefined)
+        throw new Error("Expected a plugin-held follow-up");
+      expect(offers).toEqual([{ status: "active", queuedIds: [] }]);
+
+      const completed = await harness.app.request("/internal/session/events", {
+        method: "POST",
+        headers: internalAuthHeaders(harness, { hostId: host.id }),
+        body: JSON.stringify({
+          sessionId: session.id,
+          eventGroups: groupHostDaemonEvents([
+            {
+              threadId: thread.id,
+              event: {
+                type: "turn/completed",
+                threadId: thread.id,
+                providerThreadId,
+                scope: turnScope(turnId),
+                status: "completed",
+              },
+            },
+          ]),
+        }),
+      });
+      expect(completed.status, await completed.text()).toBe(200);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getThread(harness.db, thread.id)?.status).toBe("idle");
+      expect(turnRequests(harness, thread.id)).toHaveLength(1);
+      expect(listQueuedThreadMessages(harness.db, thread.id)).toMatchObject([
+        {
+          id: row.id,
+          sendAt,
+          waitingOn: JSON.stringify({
+            kind: "plugin",
+            pluginId: "limiter",
+            reason: "Waiting for idle",
+            notBefore: sendAt,
+          }),
+        },
+      ]);
+
+      vi.setSystemTime(sendAt - 1);
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "time-reached",
+        now: Date.now(),
+      });
+      expect(turnRequests(harness, thread.id)).toHaveLength(1);
+
+      vi.setSystemTime(sendAt);
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "time-reached",
+        now: Date.now(),
+      });
+      const requests = turnRequests(harness, thread.id);
+      expect(requests).toHaveLength(2);
+      expect(
+        turnRequestEventDataSchema.parse(JSON.parse(requests[1]!.data)).input,
+      ).toMatchObject(input);
+      expect(offers).toEqual([
+        { status: "active", queuedIds: [] },
+        { status: "idle", queuedIds: [row.id] },
+      ]);
+      expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([]);
     });
   });
 
@@ -1445,7 +1565,7 @@ describe("message.dispatch hooks on the queue drain", () => {
   });
 });
 
-describe("a retry's caller not-before under a plugin hold", () => {
+describe("caller not-before under a plugin hold", () => {
   it.each(["plugin unregister", "orphan sweep"] as const)(
     "keeps the retry scheduled at its not-before after %s",
     async (clear) => {

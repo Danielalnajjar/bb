@@ -23,9 +23,10 @@ present, is 1–200 characters. Core reads all plugin namespaces with
 `readRestartResumeFacts`; any valid hold blocks native restart planning and
 automatic admission for an existing restart retry. Invalid records are
 ignored. Explicit Send now overrides the hold. A PATCH that clears the last
-hold wakes due dispatch on that thread and reoffers its undated plugin-held
-restart retry once, without changing the row's wait or schedule. Any valid
-`receiptBacked: true` adds a receipt check to the restart continuation.
+hold wakes due dispatch on that thread and reoffers its waiting restart retry
+once when it is not dated in the future, without changing the row's wait or
+schedule. Any valid `receiptBacked: true` adds a receipt check to the restart
+continuation.
 
 Before stabilization, verify the paired Crew upgrade and pause/unpause
 lifecycle, and audit namespace ownership, retry identity and clear-to-dispatch

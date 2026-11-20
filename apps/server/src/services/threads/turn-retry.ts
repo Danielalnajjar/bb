@@ -5,7 +5,7 @@ import {
   updateQueuedThreadMessage,
   type QueuedThreadMessageRow,
 } from "@bb/db";
-import { permissionModeSchema } from "@bb/domain";
+import { permissionModeSchema, RESTART_RESUME_RETRY_REASON } from "@bb/domain";
 import type {
   ClientTurnRequestId,
   PermissionMode,
@@ -244,6 +244,13 @@ export async function retryFailedTurn(
   deps: TurnRetryDeps,
   args: RetryFailedTurnArgs,
 ): Promise<RetryTurnResponse> {
+  if (args.request.reason === RESTART_RESUME_RETRY_REASON) {
+    throw new ApiError(
+      400,
+      "retry_reason_reserved",
+      `The reason "${RESTART_RESUME_RETRY_REASON}" is reserved for automatic restart recovery.`,
+    );
+  }
   const failed = requireFailedTurn(deps, {
     thread: args.thread,
     turnRequestId: args.request.turnRequestId,

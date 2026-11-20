@@ -479,6 +479,37 @@ describe("the turn.failed announcement", () => {
 });
 
 describe("retrying a failed turn", () => {
+  it("rejects the reserved restart reason without queuing or sending a retry", async () => {
+    await withTestHarness(async (harness) => {
+      const { requestId, thread } = seedFailableThread(
+        harness,
+        "host-reserved-retry-reason",
+      );
+      failThread(harness, thread.id);
+      expect(buildTurnFailedEvent(harness.db, thread.id)).toMatchObject({
+        requestId,
+      });
+      const response = await harness.app.request(
+        `/api/v1/threads/${thread.id}/retry`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            turnRequestId: requestId,
+            reason: "bb restarted",
+            sendAt: Date.now() + 60_000,
+          }),
+        },
+      );
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        code: "retry_reason_reserved",
+      });
+      expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([]);
+      expect(turnRequests(harness, thread.id)).toHaveLength(1);
+    });
+  });
+
   it("queues a by-reference row on the clock and re-submits the original turn", async () => {
     await withTestHarness(async (harness) => {
       const sendAt = Date.now() + 60_000;
