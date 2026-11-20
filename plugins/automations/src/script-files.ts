@@ -9,10 +9,13 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, extname, join, resolve, relative } from "node:path";
+import { AUTOMATION_SCRIPT_FILE_MAX_LENGTH } from "./limits.js";
 import type { AutomationScriptInterpreter } from "./rpc-types.js";
 
 const SCRIPT_DIR_NAME = "scripts";
 const DEFAULT_SCRIPT_FILE_NAME = "script.sh";
+const STORED_NAME_UUID_SUFFIXES =
+  /(?:\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})+$/u;
 
 const INTERPRETER_BY_EXTENSION: Record<string, AutomationScriptInterpreter> = {
   ".sh": "bash",
@@ -67,6 +70,16 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+function alternateScriptFileName(requestedName: string): string {
+  const unsuffixed = requestedName.replace(STORED_NAME_UUID_SUFFIXES, "");
+  const extension = extname(unsuffixed);
+  const stem = unsuffixed
+    .slice(0, unsuffixed.length - extension.length)
+    .replace(STORED_NAME_UUID_SUFFIXES, "");
+  const suffix = `.${randomUUID()}${extension}`;
+  return `${stem.slice(0, Math.max(0, AUTOMATION_SCRIPT_FILE_MAX_LENGTH - suffix.length))}${suffix}`;
+}
+
 export async function writeInlineAutomationScript(args: {
   dataDir: string;
   automationId: string;
@@ -78,15 +91,9 @@ export async function writeInlineAutomationScript(args: {
   );
   const dir = automationScriptDir(args.dataDir, args.automationId);
   await mkdir(dir, { recursive: true });
-  let storedName = requestedName;
-  if (await pathExists(join(dir, storedName))) {
-    const extension = extname(requestedName);
-    const stem = requestedName.slice(
-      0,
-      requestedName.length - extension.length,
-    );
-    storedName = `${stem}.${randomUUID()}${extension}`;
-  }
+  const storedName = (await pathExists(join(dir, requestedName)))
+    ? alternateScriptFileName(requestedName)
+    : requestedName;
   const target = join(dir, storedName);
   const tmp = join(dir, `.${storedName}.${randomUUID()}.tmp`);
   try {

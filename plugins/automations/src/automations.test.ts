@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   access,
   mkdtemp,
@@ -1427,6 +1428,83 @@ describe("automation service", () => {
       });
 
       await expect(access(scriptDir)).rejects.toThrow();
+    } finally {
+      await rm(pluginDataDir, { recursive: true, force: true });
+    }
+  });
+
+  const storedNameUuid =
+    "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+
+  it.each([
+    {
+      label: "a name grown by earlier updates",
+      storedName: `launch.${Array.from({ length: 5 }, () => randomUUID()).join(".")}.sh`,
+      storedLength: 194,
+      updatedName: new RegExp(`^launch\\.${storedNameUuid}\\.sh$`, "u"),
+    },
+    {
+      label: "an extensionless name grown by earlier updates",
+      storedName: `run.${randomUUID()}.${randomUUID()}`,
+      storedLength: 77,
+      updatedName: new RegExp(`^run\\.${storedNameUuid}$`, "u"),
+    },
+    {
+      label: "a name at the length limit",
+      storedName: `${"a".repeat(197)}.sh`,
+      storedLength: 200,
+      updatedName: new RegExp(`^a{160}\\.${storedNameUuid}\\.sh$`, "u"),
+    },
+  ])("keeps $label bounded across inline script updates", async (args) => {
+    expect(args.storedName).toHaveLength(args.storedLength);
+    const db = createTestDb();
+    const pluginDataDir = await mkdtemp(join(tmpdir(), "bb-auto-service-"));
+    const automation = createAutomation(db, {
+      id: "auto_script_grown_name",
+      projectId: "proj_test",
+      name: "Grown script name",
+      enabled: true,
+      trigger: oneShotTrigger(),
+      runMode: "script",
+      execution: {
+        mode: "script",
+        scriptFile: args.storedName,
+        timeoutMs: 120_000,
+        workingDirectory: { type: "automation-storage" },
+      },
+      origin: "human",
+      createdByThreadId: null,
+      nextRunAt: Date.now() + 60_000,
+    });
+    const scriptDir = automationScriptDir(pluginDataDir, automation.id);
+    await mkdir(scriptDir, { recursive: true });
+    await writeFile(join(scriptDir, args.storedName), "echo old\n");
+    const service = createAutomationService({
+      bb: createAutomationServiceBb(),
+      db,
+      pluginDataDir,
+      scriptRuns: createScriptRunScope(),
+    });
+
+    try {
+      for (const content of ["echo one\n", "echo two\n", "echo three\n"]) {
+        const updated = await service.update({
+          projectId: "proj_test",
+          automationId: automation.id,
+          script: { script: content },
+        });
+        const execution = updated.execution;
+        if (execution.mode !== "script") {
+          throw new Error("Expected a script automation");
+        }
+        expect(execution.scriptFile).toMatch(args.updatedName);
+        await expect(readdir(scriptDir)).resolves.toEqual([
+          execution.scriptFile,
+        ]);
+        await expect(
+          readFile(join(scriptDir, execution.scriptFile ?? ""), "utf8"),
+        ).resolves.toBe(content);
+      }
     } finally {
       await rm(pluginDataDir, { recursive: true, force: true });
     }
