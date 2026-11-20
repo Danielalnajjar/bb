@@ -393,6 +393,7 @@ export default async function concurrencyLimitPlugin(
       const targets = availableHosts.filter(
         (availableHost) =>
           availableHost.status === "connected" &&
+          availableHost.lifecycle.phase === "active" &&
           (refreshAll || hostIds.has(availableHost.id)),
       );
       await Promise.all(
