@@ -517,10 +517,11 @@ Resume interrupted threads after a restart is available in Settings → General 
   queued, the queue does not automatically send the thread's other rows; one
   that comes up is re-queued as `thread-busy` and sends after the retry's turn
   ends. That is what keeps messages queued or steered while the daemon was down
-  behind the resume. Without the experiment, a `--send-at` message or a row a
-  plugin releases can go out ahead of a retry scheduled for later (for example
-  a provider-retry row waiting hours for a subscription window) and overtake
-  it; with it, those rows wait for the retry.
+  behind the resume. A held restart retry does not block other rows through
+  retry priority, but an ordinary live retry still does. Without the experiment,
+  a `--send-at` message or a row a plugin releases can go out ahead of a retry
+  scheduled for later (for example a provider-retry row waiting hours for a
+  subscription window) and overtake it; with it, those rows wait for the retry.
 
 ## AI services
 

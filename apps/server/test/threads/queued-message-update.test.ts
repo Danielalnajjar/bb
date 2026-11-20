@@ -333,20 +333,29 @@ describe("changing when a queued message sends", () => {
   });
 });
 
-it("lists claimed rows in queue order without changing unclaimed rows", async () => {
+it("lists only the requested thread's rows and keeps claims in queue order", async () => {
   await withTestHarness(async (harness) => {
     const thread = seedIdleThread(harness, "host-queue-list-claims");
+    const other = seedIdleThread(harness, "host-other-queue-list-claims");
     const sendAt = Date.now() + HOUR_MS;
     const first = await scheduleMessage(harness, thread.id, "First", sendAt);
+    const middle = await scheduleMessage(harness, thread.id, "Middle", sendAt);
     const next = await scheduleMessage(harness, thread.id, "Next", sendAt);
-
-    const claimed = claimQueuedThreadMessageGroup(
-      harness.db,
-      harness.hub,
-      first.id,
-      { kind: "explicit-send" },
+    const otherClaim = await scheduleMessage(
+      harness,
+      other.id,
+      "Other claim",
+      sendAt,
     );
-    expect(claimed).toMatchObject([{ id: first.id, state: "claimed" }]);
+    await scheduleMessage(harness, other.id, "Other unclaimed", sendAt);
+
+    for (const row of [middle, otherClaim]) {
+      expect(
+        claimQueuedThreadMessageGroup(harness.db, harness.hub, row.id, {
+          kind: "explicit-send",
+        }),
+      ).toMatchObject([{ id: row.id, state: "claimed" }]);
+    }
 
     const response = await harness.app.request(
       `/api/v1/threads/${thread.id}/queued-messages`,
@@ -355,9 +364,10 @@ it("lists claimed rows in queue order without changing unclaimed rows", async ()
     expect(
       threadQueuedMessageSchema.array().parse(await readJson(response)),
     ).toEqual([
+      first,
       expect.objectContaining({
-        id: first.id,
-        content: first.content,
+        id: middle.id,
+        content: middle.content,
         state: "claimed",
         editable: false,
       }),

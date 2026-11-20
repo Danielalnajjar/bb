@@ -671,7 +671,7 @@ describe("resuming threads after a restart", () => {
     },
   );
 
-  it.each(["proceed", "undated wait", "dated wait"])(
+  it.each(["proceed", "undated wait", "dated wait", "reject"])(
     "preserves a due restart retry when a claimed hook returns %s after the hold",
     async (decision) => {
       vi.useFakeTimers({ toFake: ["Date"] });
@@ -709,6 +709,8 @@ describe("resuming threads after a restart", () => {
                 reason: "At capacity",
                 sendAt: Date.now() + 60_000,
               };
+            case "reject":
+              return { action: "reject", message: "At capacity" };
             default:
               return { action: "proceed" };
           }
@@ -807,6 +809,92 @@ describe("resuming threads after a restart", () => {
       expect(await reofferedAt.promise).toBe(row.sendAt);
       await expectRestartDelivered(harness, thread.id, requestId);
       expect(attempts).toBe(2);
+    });
+  });
+
+  it("reoffers a queued restart retry on last clear after its waiting plugin unregisters", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setImmediate", "clearImmediate"] });
+    await withTestHarness(async (harness) => {
+      continueAfterRestarts(harness, true);
+      const fixture = seedHostWithProject(harness);
+      const { requestId, thread } = seedRunningThread(harness, fixture);
+      await restartDaemon(harness, fixture);
+      const [row] = queue(harness, thread.id);
+      if (row?.sendAt == null)
+        throw new Error("Expected a scheduled restart retry");
+      vi.setSystemTime(row.sendAt);
+      installDispatchHook(() => ({ action: "wait", reason: "At capacity" }));
+      await runDueWake(harness);
+      expect(getQueuedThreadMessage(harness.db, row.id)).toMatchObject({
+        state: "waiting",
+        waitHolder: "plugin:limiter",
+      });
+
+      await patchRestartResumeMetadata(harness, thread.id, {
+        set: { [RESTART_RESUME_METADATA_KEY]: { hold: true } },
+      });
+      setPluginHookProvider(undefined);
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "plugin-unregistered",
+        pluginId: "limiter",
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(getQueuedThreadMessage(harness.db, row.id)).toMatchObject({
+        state: "queued",
+        sendAt: null,
+        waitingOn: null,
+      });
+      expect(turnRequests(harness, thread.id)).toHaveLength(1);
+
+      await patchRestartResumeMetadata(harness, thread.id, {
+        remove: [RESTART_RESUME_METADATA_KEY],
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await expectRestartDelivered(harness, thread.id, requestId);
+    });
+  });
+
+  it("leaves a future-dated plugin wait alone on last clear until it is due", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setImmediate", "clearImmediate"] });
+    await withTestHarness(async (harness) => {
+      continueAfterRestarts(harness, true);
+      const fixture = seedHostWithProject(harness);
+      const { requestId, thread } = seedRunningThread(harness, fixture);
+      await restartDaemon(harness, fixture);
+      const [row] = queue(harness, thread.id);
+      if (row?.sendAt == null)
+        throw new Error("Expected a scheduled restart retry");
+      vi.setSystemTime(row.sendAt);
+      const dueAt = row.sendAt + 60_000;
+      const hook = vi.fn(() => ({
+        action: "wait" as const,
+        reason: "At capacity",
+        sendAt: dueAt,
+      }));
+      installDispatchHook(hook);
+      await runDueWake(harness);
+      const waiting = getQueuedThreadMessage(harness.db, row.id);
+      expect(waiting).toMatchObject({
+        state: "scheduled",
+        waitHolder: "plugin:limiter",
+        sendAt: dueAt,
+      });
+
+      await patchRestartResumeMetadata(harness, thread.id, {
+        set: { [RESTART_RESUME_METADATA_KEY]: { hold: true } },
+      });
+      await patchRestartResumeMetadata(harness, thread.id, {
+        remove: [RESTART_RESUME_METADATA_KEY],
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(hook).toHaveBeenCalledOnce();
+      expect(getQueuedThreadMessage(harness.db, row.id)).toEqual(waiting);
+      expect(turnRequests(harness, thread.id)).toHaveLength(1);
+
+      installDispatchHook(() => ({ action: "proceed" }));
+      vi.setSystemTime(dueAt);
+      await runDueWake(harness);
+      await expectRestartDelivered(harness, thread.id, requestId);
     });
   });
 
@@ -986,6 +1074,62 @@ describe("resuming threads after a restart", () => {
       expect(
         lastTurnRequest(harness, thread.id).retryOfRequestId,
       ).toBeUndefined();
+    });
+  });
+
+  it("keeps ordinary live retry priority while the restart retry is held", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    await withTestHarness(async (harness) => {
+      continueAfterRestarts(harness, true);
+      const fixture = seedHostWithProject(harness);
+      const { thread } = seedRunningThread(harness, fixture);
+      await restartDaemon(harness, fixture);
+      const [resume] = queue(harness, thread.id);
+      if (resume?.sendAt == null)
+        throw new Error("Expected a scheduled restart retry");
+      await patchRestartResumeMetadata(harness, thread.id, {
+        set: { [RESTART_RESUME_METADATA_KEY]: { hold: true } },
+      });
+      const dueAt = resume.sendAt + 100;
+      const retry = createQueuedThreadMessage(harness.db, harness.hub, {
+        threadId: thread.id,
+        content: textInput("Retry the earlier request"),
+        model: "gpt-5",
+        reasoningLevel: "medium",
+        permissionMode: "full",
+        serviceTier: "default",
+        payload: {
+          kind: "retry",
+          retryOfTurnRequestId: encodeClientTurnRequestIdNumber({ value: 7 }),
+          attempt: 2,
+          reason: "Rate limited",
+        },
+        waitingOn: { kind: "time" },
+        sendAt: dueAt + 5_000,
+        systemNotice: null,
+      });
+      const response = await harness.app.request(
+        `/api/v1/threads/${thread.id}/send`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            input: textInput("Take the new instruction"),
+            mode: "auto",
+            sendAt: dueAt,
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+
+      vi.setSystemTime(dueAt);
+      await runDueWake(harness);
+      expect(requestTexts(harness, thread.id)).toEqual(["Do the thing"]);
+      expect(queue(harness, thread.id)).toMatchObject([
+        { id: resume.id, sendAt: resume.sendAt },
+        { id: retry.id, sendAt: retry.sendAt },
+        { payload: { kind: "inline" }, waitingOn: { kind: "thread-busy" } },
+      ]);
     });
   });
 

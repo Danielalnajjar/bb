@@ -140,13 +140,15 @@ function printQueueTable(rows: ThreadQueuedMessagesResult): void {
       MAX_QUEUE_TEXT_WIDTH,
     ),
     row.state,
-    truncateCell(
-      row.failureReason === null
-        ? describeQueueWait(row)
-        : `Failed: ${row.failureReason}`,
-      MAX_QUEUE_TEXT_WIDTH,
-    ),
-    formatQueueSendCountdown(row.sendAt, now),
+    row.state === "claimed"
+      ? ""
+      : truncateCell(
+          row.failureReason === null
+            ? describeQueueWait(row)
+            : `Failed: ${row.failureReason}`,
+          MAX_QUEUE_TEXT_WIDTH,
+        ),
+    row.state === "claimed" ? "" : formatQueueSendCountdown(row.sendAt, now),
   ]);
   printBorderlessTable(
     {
@@ -164,7 +166,7 @@ function printQueueTable(rows: ThreadQueuedMessagesResult): void {
     table,
   );
   for (const row of rows) {
-    if (row.failureReason === null) continue;
+    if (row.state === "claimed" || row.failureReason === null) continue;
     console.log(`Failed ${row.id}: ${row.failureReason}`);
     console.log(`Retry: bb thread queue send ${row.threadId} ${row.id}`);
   }

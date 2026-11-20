@@ -2592,7 +2592,7 @@ export function hasLiveQueuedRetry(
   );
 }
 
-export function getDueWaitingRestartResume(
+export function getDueUnscheduledRestartResume(
   db: DbQueryConnection,
   threadId: string,
   now: number,
@@ -2610,7 +2610,7 @@ export function getDueWaitingRestartResume(
         liveThread,
         eq(queuedThreadMessages.payloadKind, "retry"),
         eq(queuedThreadMessages.retryReason, RESTART_RESUME_RETRY_REASON),
-        eq(queuedThreadMessages.state, "waiting"),
+        inArray(queuedThreadMessages.state, ["waiting", "queued"]),
         notSupersededQueuedThreadMessage(),
         or(
           isNull(queuedThreadMessages.sendAt),

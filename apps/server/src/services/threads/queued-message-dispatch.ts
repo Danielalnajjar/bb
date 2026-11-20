@@ -3,7 +3,7 @@ import { isMachineWaitingForExecution } from "../machines/lifecycle.js";
 import { isServerMoveFrozen } from "../server-move/freeze-state.js";
 import { waitForMachineMaintenance } from "../machines/provider-orchestration.js";
 import {
-  getDueWaitingRestartResume,
+  getDueUnscheduledRestartResume,
   getQueuedThreadMessage,
   getThread,
   listDueScheduledQueuedThreadMessages,
@@ -327,7 +327,7 @@ async function executePreparedQueuedMessageDispatch(
         now,
         wake.threadId,
       );
-      const row = getDueWaitingRestartResume(deps.db, wake.threadId, now);
+      const row = getDueUnscheduledRestartResume(deps.db, wake.threadId, now);
       if (row !== undefined) await attemptQueuedMessageNow(deps, row);
       for (const due of dueRows) {
         await attemptAutomaticQueuedMessage(deps, due, {
@@ -514,12 +514,13 @@ async function attemptAutomaticQueuedMessage(
       );
       return;
     }
-    recordQueuedMessageDrainFailure(deps, {
+    const handled = recordQueuedMessageDrainFailure(deps, {
       error,
       now: args.now,
       row,
       thread,
     });
+    if (!handled) return;
     deps.logger.warn(
       {
         queuedMessageId: row.id,
