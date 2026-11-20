@@ -83,6 +83,7 @@ import {
 } from "../delta-translation.js";
 import {
   compactionOutcomeForEndTurn,
+  CURSOR_ACP_DIALECT,
   grokContextUsageFromPromptResult,
   grokContextWindowSizeFromSessionModels,
   resolveAcpDialect,
@@ -2484,6 +2485,7 @@ async function startAgentSession(
     if (mcpServer) {
       session.cursorMcpApproval = await approveCursorSessionMcpServer({
         agentCommand: params.agent.command,
+        cursorDialect: dialect.id === CURSOR_ACP_DIALECT.id,
         config: mcpServer,
         cwd: params.cwd,
         env: childEnv,

@@ -3034,6 +3034,56 @@ describe("acp bridge", () => {
           canInstall: false,
           loginCommand: null,
         });
+
+        writeFileSync(launcher, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+        expect(await providerHealth()).toMatchObject({ status: "unknown" });
+        rmSync(launcher);
+        expect(await providerHealth()).toMatchObject({
+          status: "not_installed",
+        });
+      },
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "approves Cursor session MCP servers through a differently named executable",
+      async () => {
+        const launcher = loggingNodeLauncher();
+        vi.stubEnv(COMMAND_ENV, launcher.path);
+        const cursorDataDir = join(workspaceDir, "cursor-data");
+        const { providerThreadId } = await startThread({
+          agent: { command: DECLARED_COMMAND, args: [FAKE_AGENT_PATH] },
+          commandEnv: COMMAND_ENV,
+          dialectId: "cursor",
+          envVars: { CURSOR_DATA_DIR: cursorDataDir },
+          dynamicTools: [
+            {
+              name: "update_environment_directory",
+              description: "Move this thread to another environment directory.",
+              inputSchema: { type: "object", properties: {} },
+            },
+          ],
+        });
+        expect(launches(launcher.log)).toEqual([FAKE_AGENT_PATH]);
+        const projectSlug = workspaceDir
+          .replace(/[^a-zA-Z0-9]/gu, "-")
+          .replace(/-+/gu, "-")
+          .replace(/^-+|-+$/gu, "");
+        const approvalPath = join(
+          cursorDataDir,
+          "projects",
+          projectSlug,
+          "mcp-approvals.json",
+        );
+        expect(
+          JSON.parse(readFileSync(approvalPath, "utf8")) as unknown,
+        ).toEqual([
+          expect.stringMatching(`^${ACP_BRIDGE_MCP_SERVER_NAME}-[a-f0-9]{16}$`),
+        ]);
+
+        await stopThread(providerThreadId);
+        expect(
+          JSON.parse(readFileSync(approvalPath, "utf8")) as unknown,
+        ).toEqual([]);
       },
     );
   });
