@@ -13,6 +13,8 @@ import type { AutomationScriptInterpreter } from "./rpc-types.js";
 
 const SCRIPT_DIR_NAME = "scripts";
 const DEFAULT_SCRIPT_FILE_NAME = "script.sh";
+const STORED_NAME_UUID_SUFFIXES =
+  /(?:\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})+$/u;
 
 const INTERPRETER_BY_EXTENSION: Record<string, AutomationScriptInterpreter> = {
   ".sh": "bash",
@@ -81,10 +83,9 @@ export async function writeInlineAutomationScript(args: {
   let storedName = requestedName;
   if (await pathExists(join(dir, storedName))) {
     const extension = extname(requestedName);
-    const stem = requestedName.slice(
-      0,
-      requestedName.length - extension.length,
-    );
+    const stem = requestedName
+      .slice(0, requestedName.length - extension.length)
+      .replace(STORED_NAME_UUID_SUFFIXES, "");
     storedName = `${stem}.${randomUUID()}${extension}`;
   }
   const target = join(dir, storedName);
