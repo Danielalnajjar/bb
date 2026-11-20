@@ -1,21 +1,43 @@
-import { and, desc, eq, gt, lt, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, lt, or, sql } from "drizzle-orm";
 import {
   events as storedEvents,
+  findLastRootStoredTurnStarted,
+  findStoredEventReceipt,
   getThread,
+  hasHandledRootTurnCompletion,
+  isEventLifecycleApplied,
   isStoredTurnContextCompactionOnly,
   isTurnAimedAtByEarlierStop,
+  markEventLifecycleApplied,
+  markTurnCompletionParentNoticeHandled,
+  readThreadRunState,
+  type DbQueryConnection,
+  type DbTransaction,
 } from "@bb/db";
 import {
   systemThreadInterruptedEventDataSchema,
   type ChildThreadOutcome,
   type HeldTurnCompletionStatus,
+  type ResolvedThreadExecutionOptions,
   type ThreadEventTurnStatus,
 } from "@bb/domain";
 import type {
   AppDeps,
   LoggedPendingInteractionWorkSessionDeps,
 } from "../../types.js";
-import { queueChildThreadTurnNotificationBestEffort } from "./child-thread-notifications.js";
+import {
+  announceChildThreadTurnNotificationWrite,
+  queueChildThreadTurnNotificationBestEffort,
+  writeChildThreadTurnNotificationInTransaction,
+  type QueueChildThreadTurnNotificationArgs,
+} from "./child-thread-notifications.js";
+import type { CoalescedNoticeWrite } from "./coalesced-system-notices.js";
+import { NotificationBuffer } from "../lib/notification-buffer.js";
+import {
+  runThreadLifecycleInTransaction,
+  type ThreadLifecycleOutcome,
+} from "./lifecycle/run.js";
+import { buildExecutionOptions } from "./thread-commands.js";
 import { isParentNotifiableChildThread } from "./thread-parent.js";
 import {
   continueAfterEnvironmentDirectoryUpdate,
@@ -224,6 +246,22 @@ export function addParentTurnNotificationFollowUp(
   });
 }
 
+function parentTurnNotificationArgs(
+  followUp: ParentTurnNotificationFollowUp,
+): QueueChildThreadTurnNotificationArgs {
+  return {
+    childThread: {
+      id: followUp.childThreadId,
+      projectId: followUp.projectId,
+      title: followUp.title,
+    },
+    parentThreadId: followUp.parentThreadId,
+    turnStatus: followUp.turnStatus,
+    turnId: followUp.turnId,
+    ...(followUp.interruption ? { interruption: followUp.interruption } : {}),
+  };
+}
+
 export async function executeTurnEndFollowUpBestEffort(
   deps: LoggedPendingInteractionWorkSessionDeps,
   followUp: TurnEndFollowUp,
@@ -231,19 +269,10 @@ export async function executeTurnEndFollowUpBestEffort(
   try {
     switch (followUp.kind) {
       case "parent-turn-notification":
-        await queueChildThreadTurnNotificationBestEffort(deps, {
-          childThread: {
-            id: followUp.childThreadId,
-            projectId: followUp.projectId,
-            title: followUp.title,
-          },
-          parentThreadId: followUp.parentThreadId,
-          turnStatus: followUp.turnStatus,
-          turnId: followUp.turnId,
-          ...(followUp.interruption
-            ? { interruption: followUp.interruption }
-            : {}),
-        });
+        await queueChildThreadTurnNotificationBestEffort(
+          deps,
+          parentTurnNotificationArgs(followUp),
+        );
         return;
       case "queued-message-dispatch":
         await runQueuedMessageDispatch(deps, followUp.wake);
@@ -377,6 +406,283 @@ export function idleFollowUpForTurnEnd(
   return {
     kind: "queued-message-dispatch",
     wake: { kind: "thread-ready", threadId: args.threadId },
+  };
+}
+
+interface CompleteTurnLifecycleArgs {
+  aimedAtByStop: boolean;
+  completionSequence: number;
+  failedParentNotificationThreadIds: Set<string>;
+  replayReceiptId: string | null;
+  status: HeldTurnCompletionStatus;
+  thread: TurnEndThread;
+  turnId: string;
+}
+
+interface ParentNoticeWrite {
+  parentThreadId: string;
+  write: CoalescedNoticeWrite;
+}
+
+function canRepairReplayedCompletion(
+  tx: DbTransaction,
+  args: CompleteTurnLifecycleArgs,
+  receiptId: string,
+): boolean {
+  const threadId = args.thread.id;
+  const receipt = findStoredEventReceipt(tx, receiptId);
+  if (
+    receipt === null ||
+    receipt.type !== "turn/completed" ||
+    receipt.threadId !== threadId ||
+    receipt.turnId !== args.turnId ||
+    receipt.status !== args.status ||
+    receipt.sequence !== args.completionSequence
+  ) {
+    return false;
+  }
+  const latestStart = findLastRootStoredTurnStarted(tx, { threadId });
+  if (latestStart?.turnId !== args.turnId) return false;
+  if (readThreadRunState(tx, threadId).heldCompletion?.turnId === args.turnId) {
+    return false;
+  }
+  return !hasRootTurnSupersessionAfter(tx, {
+    afterSequence: latestStart.sequence,
+    interruptionsSupersede: false,
+    threadId,
+    turnId: args.turnId,
+  });
+}
+
+export function hasRootTurnSupersessionAfter(
+  db: DbQueryConnection,
+  args: {
+    afterSequence: number;
+    interruptionsSupersede: boolean;
+    threadId: string;
+    turnId: string | null;
+  },
+): boolean {
+  const kind = sql`json_extract(${storedEvents.data}, '$.target.kind')`;
+  const newerAdmission = and(
+    eq(storedEvents.type, "client/turn/requested"),
+    sql`${kind} <> 'steer'`,
+    args.turnId === null
+      ? undefined
+      : sql`not (${kind} = 'auto' and (json_extract(${storedEvents.data}, '$.target.expectedTurnId') is ${args.turnId} or exists (
+          select 1
+          from events as accepted
+          where accepted.thread_id = ${storedEvents.threadId}
+            and accepted.type = 'turn/input/accepted'
+            and json_extract(accepted.data, '$.clientRequestId') = json_extract(${storedEvents.data}, '$.requestId')
+            and accepted.turn_id = ${args.turnId}
+        )))`,
+  );
+  return (
+    db
+      .select({ found: sql<number>`1` })
+      .from(sql`${storedEvents} INDEXED BY events_thread_type_sequence_idx`)
+      .where(
+        and(
+          eq(storedEvents.threadId, args.threadId),
+          inArray(
+            storedEvents.type,
+            args.interruptionsSupersede
+              ? ["client/turn/requested", "system/thread/interrupted"]
+              : ["client/turn/requested"],
+          ),
+          gt(storedEvents.sequence, args.afterSequence),
+          args.interruptionsSupersede
+            ? or(
+                newerAdmission,
+                eq(storedEvents.type, "system/thread/interrupted"),
+              )
+            : newerAdmission,
+        ),
+      )
+      .limit(1)
+      .get() !== undefined
+  );
+}
+
+function unchangedLifecycleOutcome(
+  tx: DbTransaction,
+  threadId: string,
+): ThreadLifecycleOutcome {
+  const thread = getThread(tx, threadId);
+  return {
+    effects: [],
+    previousStatus: thread?.status ?? null,
+    refusal: null,
+    statusChanged: false,
+    stopRoute: "none",
+    thread,
+    threadId,
+  };
+}
+
+async function resolveParentNoticeExecution(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  args: CompleteTurnLifecycleArgs,
+): Promise<ResolvedThreadExecutionOptions | null> {
+  const { thread } = args;
+  if (!isParentNotifiableChildThread(thread, args.status)) return null;
+  const parent = getThread(deps.db, thread.parentThreadId);
+  if (
+    parent === null ||
+    parent.archivedAt !== null ||
+    parent.deletedAt !== null
+  )
+    return null;
+  try {
+    return await buildExecutionOptions(deps, {}, { threadId: parent.id });
+  } catch (error) {
+    deps.logger.error(
+      {
+        childThreadId: thread.id,
+        parentThreadId: parent.id,
+        turnStatus: args.status,
+        err: error,
+      },
+      "Failed to resolve parent execution for child turn notification",
+    );
+    return null;
+  }
+}
+
+function writeParentNoticeInSavepoint(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  tx: DbTransaction,
+  followUp: ParentTurnNotificationFollowUp,
+  execution: ResolvedThreadExecutionOptions,
+): CoalescedNoticeWrite | null {
+  try {
+    return tx.transaction((savepoint) =>
+      writeChildThreadTurnNotificationInTransaction(
+        savepoint,
+        parentTurnNotificationArgs(followUp),
+        execution,
+      ),
+    );
+  } catch (error) {
+    deps.logger.error(
+      {
+        childThreadId: followUp.childThreadId,
+        parentThreadId: followUp.parentThreadId,
+        turnStatus: followUp.turnStatus,
+        err: error,
+      },
+      "Failed to write parent child turn notification",
+    );
+    return null;
+  }
+}
+
+export async function completeTurnLifecycle(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  args: CompleteTurnLifecycleArgs,
+): Promise<{
+  outcome: ThreadLifecycleOutcome;
+  idleFollowUp: TurnEndFollowUp | null;
+}> {
+  const { status, thread, turnId } = args;
+  const execution = await resolveParentNoticeExecution(deps, args);
+  const notifications = new NotificationBuffer();
+  const completed = deps.db.transaction(
+    (tx) => {
+      if (
+        isEventLifecycleApplied(tx, {
+          threadId: thread.id,
+          sequence: args.completionSequence,
+        }) ||
+        (args.replayReceiptId !== null &&
+          !canRepairReplayedCompletion(tx, args, args.replayReceiptId))
+      ) {
+        return {
+          outcome: unchangedLifecycleOutcome(tx, thread.id),
+          idleFollowUp: null,
+          writes: [],
+        };
+      }
+      const held = readThreadRunState(tx, thread.id).heldCompletion;
+      const outcome = runThreadLifecycleInTransaction(
+        { ...deps, db: tx, hub: notifications },
+        thread.id,
+        { type: "turn.completed", turnId, status },
+      );
+      markEventLifecycleApplied(tx, {
+        threadId: thread.id,
+        sequence: args.completionSequence,
+      });
+      const ended = outcome.effects.find(
+        (effect) => effect.kind === "turn-ended",
+      );
+      const writes: ParentNoticeWrite[] = [];
+      if (ended === undefined || ended.kind !== "turn-ended") {
+        return { outcome, idleFollowUp: null, writes };
+      }
+      const plan = planTurnEnd(deps, {
+        aimedAtByStop: args.aimedAtByStop,
+        failedParentNotificationThreadIds:
+          args.failedParentNotificationThreadIds,
+        status,
+        thread,
+        turnId,
+      });
+      const idle =
+        ended.disposition === "applied" && outcome.thread?.status === "idle";
+      const idleFollowUp = idle
+        ? idleFollowUpForTurnEnd(plan, { status, threadId: thread.id })
+        : null;
+      const noticesDue =
+        plan.continuation === null || !(idle || ended.disposition === "held");
+      const repeated =
+        (held?.turnId === turnId && held.status === status) ||
+        (ended.disposition === "ignored" &&
+          hasHandledRootTurnCompletion(tx, {
+            threadId: thread.id,
+            turnId,
+            status,
+            throughSequence: args.completionSequence,
+          }));
+      if (noticesDue && !repeated && execution !== null) {
+        for (const notification of plan.parentNotifications) {
+          const write = writeParentNoticeInSavepoint(
+            deps,
+            tx,
+            notification,
+            execution,
+          );
+          if (write !== null) {
+            writes.push({ parentThreadId: notification.parentThreadId, write });
+          }
+        }
+      }
+      const handedToContinuation =
+        idleFollowUp?.kind === "environment-directory-continuation" &&
+        idleFollowUp.parentNotification !== null;
+      if (
+        handedToContinuation ||
+        writes.some(
+          ({ write }) => write.kind === "created" || write.kind === "merged",
+        )
+      ) {
+        markTurnCompletionParentNoticeHandled(tx, {
+          threadId: thread.id,
+          sequence: args.completionSequence,
+        });
+      }
+      return { outcome, idleFollowUp, writes };
+    },
+    { behavior: "immediate" },
+  );
+  notifications.flushInto(deps.hub);
+  for (const { parentThreadId, write } of completed.writes) {
+    announceChildThreadTurnNotificationWrite(deps, parentThreadId, write);
+  }
+  return {
+    outcome: completed.outcome,
+    idleFollowUp: completed.idleFollowUp,
   };
 }
 

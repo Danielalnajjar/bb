@@ -1,4 +1,9 @@
-import { listQueuedThreadMessages } from "@bb/db";
+import { and, eq } from "drizzle-orm";
+import {
+  getThread,
+  listQueuedThreadMessages,
+  queuedThreadMessages,
+} from "@bb/db";
 import { turnRequestEventDataSchema, turnScope } from "@bb/domain";
 import {
   groupHostDaemonEvents,
@@ -123,10 +128,25 @@ async function runChildTurns(
   for (const turn of turns) {
     const before = JSON.stringify(readNotices());
     await postChildTurn(harness, { ...seeded, turn });
-    await vi.waitFor(() =>
-      expect(JSON.stringify(readNotices())).not.toBe(before),
-    );
-    latestNotices.push(readNotices().at(-1)!.text);
+    const latest = await vi.waitFor(() => {
+      expect(getThread(harness.db, seeded.parent.id)?.status).not.toBe("idle");
+      expect(
+        harness.db
+          .select({ id: queuedThreadMessages.id })
+          .from(queuedThreadMessages)
+          .where(
+            and(
+              eq(queuedThreadMessages.threadId, seeded.parent.id),
+              eq(queuedThreadMessages.state, "claimed"),
+            ),
+          )
+          .all(),
+      ).toEqual([]);
+      const notices = readNotices();
+      expect(JSON.stringify(notices)).not.toBe(before);
+      return notices.at(-1)!.text;
+    });
+    latestNotices.push(latest);
   }
   return latestNotices;
 }

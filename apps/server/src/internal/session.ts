@@ -9,6 +9,7 @@ import {
   updateHost,
 } from "@bb/db";
 import {
+  HOST_DAEMON_EVENT_IDS_HEADER,
   HOST_DAEMON_PROTOCOL_VERSION,
   hostDaemonProjectAttachmentContentQuerySchema,
   isCompatibleHostDaemonProtocolVersion,
@@ -263,6 +264,7 @@ export function registerInternalSessionRoutes(
         agentCpuPriority: getExperiments(deps.db).agentCpuPriority,
       },
       201,
+      { [HOST_DAEMON_EVENT_IDS_HEADER]: "1" },
     );
   });
 

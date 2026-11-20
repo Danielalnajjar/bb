@@ -66,7 +66,7 @@ async function killAtNoticeBoundary(
 afterEach(() => vi.useRealTimers());
 
 for (const cut of ["before notice", "after notice"] as const) {
-  const testCut = cut === "before notice" ? it.fails : it;
+  const testCut = it;
   testCut(
     `T3 roadmap §2 D2: delivers exactly one child result after SIGKILL ${cut}`,
     async () => {
@@ -152,5 +152,6 @@ for (const cut of ["before notice", "after notice"] as const) {
         db.$client.close();
       }
     },
+    60_000,
   );
 }
