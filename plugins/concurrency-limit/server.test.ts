@@ -299,6 +299,33 @@ describe("configuration", () => {
     await service.done;
   });
 
+  it("detects a host whose cancelled pause returns it to active", async () => {
+    const changes = hostChanges();
+    let phase: HostResponse["lifecycle"]["phase"] = "suspending";
+    const { harness } = await setup({
+      hosts: () => {
+        const host = hostRecord("host-a");
+        return [{ ...host, lifecycle: { ...host.lifecycle, phase } }];
+      },
+      subscribe: changes.subscribe,
+    });
+    const service = harness.behavior.runService("capacity-detector");
+    await vi.waitFor(() => {
+      expect(harness.inspection.sdk.callsTo("hosts.list")).toHaveLength(1);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(harness.experimental_hostRpcCalls).toHaveLength(0);
+
+    phase = "active";
+    changes.emitHostChanges("host-a", ["host-disconnected"]);
+    await vi.waitFor(() => {
+      expect(harness.experimental_hostRpcCalls).toHaveLength(1);
+    });
+
+    service.controller.abort();
+    await service.done;
+  });
+
   it("ignores host messages that only report a provider model catalog change", async () => {
     const changes = hostChanges();
     const { harness } = await setup({
