@@ -247,7 +247,7 @@ change the host-daemon protocol.
 | `BB_MARKETPLACE_URL`           | `bb-app env`, or environment                       | Startup-only testing    | Manifest URL of the reserved `bb-community` marketplace. Default `https://getbb.app/marketplace/v2/marketplace.json` (falls back to v1 on 404); a custom URL is requested without fallback. Changes only `bb-community`.                                                                                                            |
 | `BB_CONNECT_GATE_KEYS_URL`     | `bb-app env`, or environment                       | Startup-only testing    | Public key set the bb connect next tunnel ingress verifies gate assertions with. Default `https://getbb.app/.well-known/bb-connect-gate-keys.json`. See [connect-next.md](connect-next.md).                                                                                                                                         |
 | `BB_SERVER_URL`                | `bb-app config`                                    | Remote CLI/host use     | Server targeted by the standalone `bb` CLI and `host-daemon` commands on this machine. Defaults to `http://127.0.0.1:38886`. It does not change where `npx bb-app` binds.                                                                                                                                                           |
-| `BB_CONNECT_ORIGIN`            | `bb-app config`, env, or `--connect-origin`        | Daemon startup-only     | Trusted Connect cloud origin, separate from `BB_SERVER_URL`. Used for label assignment, machine tunnels, share URLs, and Connect Next trust. Unset preserves the enrollment/server URL behavior.                                                                           |
+| `BB_CONNECT_ORIGIN`            | `bb-app config`, env, or `--connect-origin`        | Daemon startup-only     | Trusted Connect cloud origin, separate from `BB_SERVER_URL`. Used for label assignment, machine tunnels, share URLs, and Connect Next trust. Unset preserves the enrollment/server URL behavior.                                                                                                                                    |
 | `BB_SERVER_BIND_HOST`          | `bb-app env`, environment, or `--server-bind-host` | Startup-only            | Server listener host: `127.0.0.1` (default) or `0.0.0.0`. Not a `bb-app config` key. See [Startup Flags](#startup-flags).                                                                                                                                                                                                           |
 | `BB_SERVER_PORT`               | `bb-app env`, environment, or `--server-port`      | Startup-only            | HTTP listener port. Defaults to `38886`.                                                                                                                                                                                                                                                                                            |
 | `BB_HOST_DAEMON_PORT`          | `bb-app env`, environment, or `--host-daemon-port` | Startup-only            | Local host-daemon API port. Defaults to `38887`.                                                                                                                                                                                                                                                                                    |
@@ -758,6 +758,16 @@ Agents from the official ACP registry can be added in the same settings
 section or with `bb acp registry`, `bb acp add <agent-id>`, and
 `bb acp remove <agent-id>`. An added agent is a `customAgents` entry running
 the registry's `npx` or `uvx` package on the thread's host.
+
+The built-in Cursor provider (`acp-cursor`) runs `cursor-agent`. Set
+`BB_CURSOR_AGENT_EXECUTABLE` in a machine's host-daemon environment to run
+another executable there instead, for both model discovery
+(`<executable> --list-models`) and threads (`<executable> acp`); other machines
+keep `cursor-agent`. Use a full path, and restart bb on that machine after
+changing it. While it is set, the machine reports Cursor ready only when the
+executable exists and `<executable> --version` exits successfully; bb's Cursor
+install, sign-in, and usage readings, which target the official CLI, are off
+there.
 
 ## Custom Models
 

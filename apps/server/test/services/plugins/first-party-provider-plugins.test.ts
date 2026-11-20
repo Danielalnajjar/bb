@@ -340,6 +340,9 @@ describe("first-party provider plugins", () => {
           "BB_CLAUDE_CODE_EXECUTABLE",
           "CLAUDE_CODE_OAUTH_TOKEN",
         ]);
+        expect(registry.get("acp-cursor")?.envPassthrough).toEqual([
+          "BB_CURSOR_AGENT_EXECUTABLE",
+        ]);
         expect(
           harness.deps.providerRegistry
             .get("codex")

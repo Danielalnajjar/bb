@@ -87,6 +87,29 @@ describe("the ACP plugin's registrations", () => {
     expect(registeredIds(host)).toContain("acp-amp");
   });
 
+  it("launches cursor-agent acp unless the host names another Cursor executable", async () => {
+    const host = await loadPlugin({});
+    const registrations = host.harness.registrations.providerRegistrations;
+    const cursor = registrations.find(
+      (declaration) => declaration.id === "acp-cursor",
+    );
+
+    expect(cursor?.env).toEqual({
+      passthrough: ["BB_CURSOR_AGENT_EXECUTABLE"],
+    });
+    expect(cursor?.experimental_bridgeOptions?.acpLaunchSpec).toMatchObject({
+      command: "cursor-agent",
+      commandEnv: "BB_CURSOR_AGENT_EXECUTABLE",
+      args: ["acp"],
+      modelCli: { listArgs: ["--list-models"] },
+    });
+    expect(
+      registrations
+        .filter((declaration) => declaration.env !== undefined)
+        .map((declaration) => declaration.id),
+    ).toEqual(["acp-cursor"]);
+  });
+
   it("removes a configured agent the setting no longer lists", async () => {
     const host = await loadPlugin({
       customAgents: customAgents({

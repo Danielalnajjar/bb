@@ -28,6 +28,13 @@ on Settings → Providers. Restore it with `bb provider enable acp-opencode`.
 This leaves other ACP agents and the host CLI intact. Disabled agents skip
 background capability probing. `bb provider list --all` includes disabled agents.
 
+`acp-cursor` runs `cursor-agent` unless the machine's host-daemon environment
+sets `BB_CURSOR_AGENT_EXECUTABLE` to another executable's full path; bb then
+uses it for model discovery and threads on that machine only, after a bb
+restart there. Such a machine reports Cursor ready only when the executable
+exists and `--version` runs, and bb's Cursor install, sign-in, and usage
+readings are off there.
+
 Cursor project skills come from `.cursor/skills`, which can link to
 `.agents/skills`. BB lists these linked skills as read-only under `cursor-project`.
 
