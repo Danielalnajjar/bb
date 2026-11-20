@@ -15,6 +15,7 @@ import {
   releaseQueuedThreadMessageEditHold,
   releaseStaleQueuedMessageClaims,
   type DbQueryConnection,
+  type QueuedThreadMessageRow,
   type QueuedThreadMessageExecution,
   type QueuedThreadMessageGroupClaimPolicy,
   type QueuedThreadMessageGroupEligibility,
@@ -56,8 +57,12 @@ import {
 } from "./thread-events.js";
 import { attemptDispatch, threadTargetHostId } from "./dispatch-attempt.js";
 import {
+  isOrdinaryTurnEndPluginHold,
+  logInvalidRestartResumeMetadata,
   QUEUED_MESSAGE_AUTO_SEND_PAUSED_CODE,
   QUEUED_MESSAGE_CLAIM_LOST_CODE,
+  QUEUED_MESSAGE_RESTART_RESUME_HELD_CODE,
+  releaseTurnEndPluginHolds,
 } from "./queue-waits.js";
 import { recordQueuedMessageDrainFailure } from "./queue-drain-failure.js";
 import {
@@ -114,8 +119,11 @@ export function createAutomaticQueuedMessageGroupEligibility(
       const waitingOn = parseStoredQueuedThreadMessageWaitingOn(member);
       switch (waitingOn?.kind) {
         case undefined:
-        case "plugin":
           return true;
+        case "plugin":
+          return (
+            waitingOn.notBefore === undefined || waitingOn.notBefore <= args.now
+          );
         case "time":
           return member.sendAt !== null && member.sendAt <= args.now;
         case "thread-busy":
@@ -336,12 +344,17 @@ const QUEUED_MESSAGE_EDIT_HOLD_LEASE_MS = 2 * 60 * 1000;
 const activeQueuedMessageClaimTokens = new Set<string>();
 
 function respectsManualStopPause(
-  args: SendClaimedQueuedMessageForThreadArgs,
+  mode: SendQueuedMessageMode,
+  sendNow: boolean,
+  rows: readonly QueuedThreadMessageRow[],
 ): boolean {
   return (
-    args.mode === "auto" &&
-    !args.sendNow &&
-    args.queuedMessages.some(isOrdinaryTurnEndQueuedMessage)
+    mode === "auto" &&
+    !sendNow &&
+    rows.some(
+      (row) =>
+        isOrdinaryTurnEndQueuedMessage(row) || isOrdinaryTurnEndPluginHold(row),
+    )
   );
 }
 
@@ -398,7 +411,7 @@ async function withActiveQueuedMessageClaims<T>(
 }
 
 function claimQueuedThreadMessageForSend(
-  deps: Pick<AppDeps, "db" | "hub">,
+  deps: Pick<AppDeps, "db" | "hub" | "logger">,
   args: SendQueuedMessageArgs,
 ): ClaimedQueuedMessage[] {
   const existingQueuedMessage = getQueuedThreadMessage(
@@ -417,6 +430,8 @@ function claimQueuedThreadMessageForSend(
     deps.hub,
     args.queuedMessageId,
     args.claimPolicy,
+    (pluginId) =>
+      logInvalidRestartResumeMetadata(deps.logger, args.threadId, pluginId),
   );
   if (claimedQueuedMessages) {
     return claimedQueuedMessages;
@@ -448,6 +463,13 @@ function isQueuedMessageAutoSendPausedError(error: unknown): boolean {
   return (
     error instanceof ApiError &&
     error.body.code === QUEUED_MESSAGE_AUTO_SEND_PAUSED_CODE
+  );
+}
+
+function isQueuedRestartResumeHeldError(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.body.code === QUEUED_MESSAGE_RESTART_RESUME_HELD_CODE
   );
 }
 
@@ -492,6 +514,9 @@ async function sendClaimedQueuedMessageForThread(
       ? sendModeForDeliveryMode(args.queuedMessages)
       : args.mode;
   const systemNotice = parseStoredQueuedThreadMessageSystemNotice(lead);
+  const leadWait = parseStoredQueuedThreadMessageWaitingOn(lead);
+  const notBefore =
+    leadWait?.kind === "plugin" ? (leadWait.notBefore ?? null) : null;
   const outcome = await attemptDispatch(deps, {
     thread: args.thread,
     payload: {
@@ -503,11 +528,16 @@ async function sendClaimedQueuedMessageForThread(
           )
         : { input, mode }),
       ...(inputGroups.length > 1 ? { inputGroups } : {}),
+      ...(notBefore === null ? {} : { sendAt: notBefore }),
     },
     source: {
       kind: "drain",
       claimed: args.queuedMessages,
-      respectManualStopPause: respectsManualStopPause(args),
+      respectManualStopPause: respectsManualStopPause(
+        args.mode,
+        args.sendNow,
+        args.queuedMessages,
+      ),
       sendNow: args.sendNow,
     },
     queuePayload: queuedMessage.payload,
@@ -606,15 +636,16 @@ async function sendClaimedQueuedMessageGroup(
 ): Promise<ThreadQueuedMessage> {
   const sendNow = args.claimPolicy.kind === "explicit-send";
   const thread = getThread(deps.db, args.threadId);
+  const stopPaused =
+    thread !== null &&
+    respectsManualStopPause(args.mode, sendNow, queuedMessages) &&
+    isThreadQueueAutoSendPaused(deps.db, thread.id);
   if (
-    thread &&
-    (isManualCompactionActive(deps, thread) ||
-      (args.mode === "auto" &&
-        !sendNow &&
-        queuedMessages.some(isOrdinaryTurnEndQueuedMessage) &&
-        isThreadQueueAutoSendPaused(deps.db, thread.id)))
+    stopPaused ||
+    (thread !== null && isManualCompactionActive(deps, thread))
   ) {
     releaseQueuedMessageClaims(deps, queuedMessages);
+    if (stopPaused) releaseTurnEndPluginHolds(deps, args.threadId);
     return toThreadQueuedMessage(queuedMessages[0]!);
   }
   try {
@@ -628,8 +659,12 @@ async function sendClaimedQueuedMessageGroup(
     );
   } catch (error) {
     releaseQueuedMessageClaims(deps, queuedMessages);
+    if (isQueuedMessageAutoSendPausedError(error)) {
+      releaseTurnEndPluginHolds(deps, args.threadId);
+      return toThreadQueuedMessage(queuedMessages[0]!);
+    }
     if (
-      isQueuedMessageAutoSendPausedError(error) ||
+      isQueuedRestartResumeHeldError(error) ||
       error instanceof ThreadContextClearInProgressError
     ) {
       return toThreadQueuedMessage(queuedMessages[0]!);
@@ -685,6 +720,8 @@ export async function sendNextQueuedMessageIfPresent(
       retryingFailure: false,
       thread: initialThread,
     }),
+    (pluginId) =>
+      logInvalidRestartResumeMetadata(deps.logger, args.threadId, pluginId),
   );
   if (!nextQueuedMessages) {
     return false;
@@ -710,9 +747,13 @@ export async function sendNextQueuedMessageIfPresent(
     );
   } catch (error) {
     releaseQueuedMessageClaims(deps, nextQueuedMessages);
+    if (isQueuedMessageAutoSendPausedError(error)) {
+      releaseTurnEndPluginHolds(deps, args.threadId);
+      return false;
+    }
     if (
       isQueuedMessageClaimLostError(error) ||
-      isQueuedMessageAutoSendPausedError(error) ||
+      isQueuedRestartResumeHeldError(error) ||
       error instanceof ThreadContextClearInProgressError
     ) {
       return false;

@@ -90,7 +90,7 @@ export const queuedMessageWaitReasonSchema = z
   .min(1)
   .max(QUEUED_MESSAGE_WAIT_REASON_MAX_LENGTH);
 
-export const queuedMessageWaitingOnSchema = z.discriminatedUnion("kind", [
+const queuedMessageCoreWaitingOnSchemas = [
   z.object({ kind: z.literal("time") }),
   z.object({ kind: z.literal("thread-busy") }),
   z.object({ kind: z.literal("stopping") }),
@@ -102,15 +102,31 @@ export const queuedMessageWaitingOnSchema = z.discriminatedUnion("kind", [
   }),
   z.object({ kind: z.literal("interaction") }),
   z.object({ kind: z.literal("app-update") }),
-  z.object({
-    kind: z.literal("plugin"),
-    pluginId: pluginIdSchema,
-    reason: queuedMessageWaitReasonSchema,
-  }),
   z.object({ kind: z.literal("superseded") }),
+] as const;
+
+const queuedMessagePluginWaitingOnSchema = z.object({
+  kind: z.literal("plugin"),
+  pluginId: pluginIdSchema,
+  reason: queuedMessageWaitReasonSchema,
+});
+
+export const queuedMessageWaitingOnSchema = z.discriminatedUnion("kind", [
+  ...queuedMessageCoreWaitingOnSchemas,
+  queuedMessagePluginWaitingOnSchema,
 ]);
 export type QueuedMessageWaitingOn = z.infer<
   typeof queuedMessageWaitingOnSchema
+>;
+
+export const storedQueuedMessageWaitingOnSchema = z.discriminatedUnion("kind", [
+  ...queuedMessageCoreWaitingOnSchemas,
+  queuedMessagePluginWaitingOnSchema.extend({
+    notBefore: z.number().int().nonnegative().optional(),
+  }),
+]);
+export type StoredQueuedMessageWaitingOn = z.infer<
+  typeof storedQueuedMessageWaitingOnSchema
 >;
 
 /**
@@ -198,6 +214,12 @@ export const queuedMessagePayloadSchema = z.discriminatedUnion("kind", [
 export type QueuedMessagePayload = z.infer<typeof queuedMessagePayloadSchema>;
 
 export const RESTART_RESUME_RETRY_REASON = "bb restarted";
+
+export function isRestartResumeRetry(payload: QueuedMessagePayload): boolean {
+  return (
+    payload.kind === "retry" && payload.reason === RESTART_RESUME_RETRY_REASON
+  );
+}
 
 /**
  * Core's own taxonomy for a queued row that is a SYSTEM notice rather than

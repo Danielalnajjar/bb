@@ -6,11 +6,13 @@ import {
   patchThreadPluginMetadata,
   getLatestThreadSequence,
   getThreadEventRewriteGeneration,
-  listQueuedThreadMessages,
+  listThreadQueuedMessagesIncludingClaims,
+  type DbQueryConnection,
 } from "@bb/db";
 import type { Hono } from "hono";
 import {
   PROMPT_HISTORY_ENTRY_LIMIT,
+  RESTART_RESUME_METADATA_KEY,
   threadEventTypeSchema,
   type Thread,
   type ThreadEventType,
@@ -31,6 +33,8 @@ import { requirePublicThread } from "../../services/lib/entity-lookup.js";
 import { callHostRetryableOnlineRpc } from "../../services/hosts/online-rpc.js";
 import { requireThreadStorageTarget } from "../../services/threads/thread-storage.js";
 import { toThreadQueuedMessage } from "../../services/threads/thread-queued-messages.js";
+import { readLoggedRestartResumeFacts } from "../../services/threads/queue-waits.js";
+import { requestQueuedMessageDispatch } from "../../services/threads/queued-message-dispatch.js";
 import { isCompactionOfferEnabled } from "../../services/threads/compaction-offer.js";
 import {
   readThreadContextWindowUsage,
@@ -212,12 +216,36 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
 
   patch(routes.pluginMetadata.update, (context, payload) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
-    const result = patchThreadPluginMetadata(deps.db, {
-      threadId: thread.id,
-      pluginId: payload.pluginId,
-      set: payload.set ?? {},
-      remove: payload.remove ?? [],
-    });
+    const set = payload.set ?? {};
+    const remove = payload.remove ?? [];
+    const update = (db: DbQueryConnection) =>
+      patchThreadPluginMetadata(db, {
+        threadId: thread.id,
+        pluginId: payload.pluginId,
+        set,
+        remove,
+      });
+    const touchesRestartResume =
+      Object.hasOwn(set, RESTART_RESUME_METADATA_KEY) ||
+      remove.includes(RESTART_RESUME_METADATA_KEY);
+    const { result, released } = touchesRestartResume
+      ? deps.db.transaction(
+          (tx) => {
+            const readFacts = () =>
+              readLoggedRestartResumeFacts(
+                { db: tx, logger: deps.logger },
+                thread.id,
+              );
+            const wasHeld = readFacts().hold !== null;
+            const result = update(tx);
+            return {
+              result,
+              released: result.ok && wasHeld && readFacts().hold === null,
+            };
+          },
+          { behavior: "immediate" },
+        )
+      : { result: update(deps.db), released: false };
     if (!result.ok) {
       throw new ApiError(
         413,
@@ -229,6 +257,12 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
       deps.logger.warn(
         `Replaced corrupt plugin metadata for thread ${thread.id}, plugin ${payload.pluginId}`,
       );
+    }
+    if (released) {
+      requestQueuedMessageDispatch(deps, {
+        kind: "restart-resume-released",
+        threadId: thread.id,
+      });
     }
     return context.json(result.metadata);
   });
@@ -406,7 +440,9 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     const threadId = context.req.param("id");
     requirePublicThread(deps.db, threadId);
     return context.json(
-      listQueuedThreadMessages(deps.db, threadId).map(toThreadQueuedMessage),
+      listThreadQueuedMessagesIncludingClaims(deps.db, threadId).map(
+        toThreadQueuedMessage,
+      ),
     );
   });
 

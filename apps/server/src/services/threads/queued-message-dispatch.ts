@@ -3,6 +3,7 @@ import { isMachineWaitingForExecution } from "../machines/lifecycle.js";
 import { isServerMoveFrozen } from "../server-move/freeze-state.js";
 import { waitForMachineMaintenance } from "../machines/provider-orchestration.js";
 import {
+  getDueUnscheduledRestartResume,
   getQueuedThreadMessage,
   getThread,
   listDueScheduledQueuedThreadMessages,
@@ -30,7 +31,10 @@ import {
   isPluginDispatchRequeuedRecently,
 } from "./dispatch-hooks.js";
 import { recordQueuedMessageDrainFailure } from "./queue-drain-failure.js";
-import { clearQueuedMessageWait } from "./queue-waits.js";
+import {
+  clearQueuedMessageWait,
+  releaseTurnEndPluginHolds,
+} from "./queue-waits.js";
 import { defineItemSweep, type ItemSweep } from "../system/item-sweep.js";
 import {
   createAutomaticQueuedMessageGroupEligibility,
@@ -53,6 +57,7 @@ export type QueuedMessageDispatchWake =
   | { kind: "host-connected"; hostId: string }
   | { kind: "app-update-released" }
   | { kind: "time-reached"; now: number }
+  | { kind: "restart-resume-released"; threadId: string }
   | { kind: "plugin-recheck" }
   | { kind: "plugin-unregistered"; pluginId: string }
   | { kind: "idle-recovery"; now: number }
@@ -124,6 +129,7 @@ function dispatchWakeContext(
     case "thread-ready":
     case "turn-started":
     case "interaction-settled":
+    case "restart-resume-released":
       return { threadId: wake.threadId, wake: wake.kind };
     case "edit-released":
       return {
@@ -314,6 +320,24 @@ async function executePreparedQueuedMessageDispatch(
     case "time-reached":
       await dueScheduledQueueSweep(deps, wake.now).run(deps, wake.now);
       return;
+    case "restart-resume-released": {
+      const now = Date.now();
+      const dueRows = listDueScheduledQueuedThreadMessages(
+        deps.db,
+        now,
+        wake.threadId,
+      );
+      const row = getDueUnscheduledRestartResume(deps.db, wake.threadId, now);
+      if (row !== undefined) await attemptQueuedMessageNow(deps, row);
+      for (const due of dueRows) {
+        await attemptAutomaticQueuedMessage(deps, due, {
+          now,
+          respectRequeuePacing: true,
+          retryingFailure: false,
+        });
+      }
+      return;
+    }
     case "idle-recovery":
       releaseStaleQueuedMessageDispatchClaims(deps, wake.now);
       await idleThreadQueueSweep(deps).run(deps, wake.now);
@@ -335,6 +359,7 @@ async function runThreadReadyDispatch(
     await deps.lifecycleDedupers.queuedMessageDispatch.run(
       threadId,
       async () => {
+        releaseTurnEndPluginHolds(deps, threadId);
         await sendNextQueuedMessageIfPresent(deps, { threadId });
       },
     );
@@ -489,12 +514,13 @@ async function attemptAutomaticQueuedMessage(
       );
       return;
     }
-    recordQueuedMessageDrainFailure(deps, {
+    const handled = recordQueuedMessageDrainFailure(deps, {
       error,
       now: args.now,
       row,
       thread,
     });
+    if (!handled) return;
     deps.logger.warn(
       {
         queuedMessageId: row.id,

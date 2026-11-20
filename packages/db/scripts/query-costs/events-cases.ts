@@ -15,6 +15,7 @@ import {
   hasStoredCancelledThreadProvisioning,
   hasStoredProviderTurnCompletedSince,
   hasStoredThreadInterruptedSince,
+  hasThreadHistoryEditAfter,
   advanceTimelineWindowBudgetFloorSequence,
   appendDaemonEventsInTransaction,
   appendStoredThreadEvent,
@@ -1521,6 +1522,30 @@ export const EVENTS_COST_CASES: readonly QueryCostCase[] = [
       findStoredEditMessageOperationRow(db, {
         operationId: "edit-operation-not-yet-committed",
         threadId: fixture.threadId,
+      }),
+  },
+  {
+    name: `${EVENTS}#hasThreadHistoryEditAfter`,
+    prepare: (db, fixture) => {
+      appendStoredThreadEvent(db, noopNotifier, {
+        threadId: fixture.threadId,
+        environmentId: fixture.environmentId,
+        scope: threadScope(),
+        type: "system/operation",
+        data: {
+          operation: "edit_message",
+          status: "completed",
+          message: "Message edited",
+          operationId: "query-cost-history-edit",
+          metadata: { cutoffSequence: lastTurn(fixture).requestSequence },
+        },
+      });
+    },
+    run: (db, fixture) =>
+      hasThreadHistoryEditAfter(db, {
+        threadId: fixture.threadId,
+        afterSequence: fixture.latestSequence,
+        cutoffAtOrBeforeSequence: lastTurn(fixture).requestSequence,
       }),
   },
   {

@@ -66,7 +66,9 @@ import {
 import { getDatabaseMaintenanceActivity } from "../src/data/maintenance.js";
 import { replaceStoredProviderModelCatalog } from "../src/data/provider-model-catalogs.js";
 import { openSession } from "../src/data/sessions.js";
+import { readRestartResumeFacts } from "../src/data/thread-plugin-metadata.js";
 import {
+  getDueUnscheduledRestartResume,
   listDueScheduledQueuedThreadMessages,
   listRetryableFailedQueuedThreadMessages,
   listQueuedThreadMessagesByWaitHolder,
@@ -274,6 +276,21 @@ describe("slow query index plans", () => {
     vi.restoreAllMocks();
   });
 
+  it("reads restart metadata with a thread-keyed namespace lookup", () => {
+    const { db, thread } = setup();
+    try {
+      const captured = captureStatements(db, () => {
+        readRestartResumeFacts(db, thread.id);
+      });
+      expect(captured).toHaveLength(1);
+      expect(queryPlanDetails({ db, ...captured[0]! })).toMatch(
+        /SEARCH thread_plugin_metadata USING INDEX \w+ \(thread_id=\?\)/u,
+      );
+    } finally {
+      db.$client.close();
+    }
+  });
+
   it("checks spawn-agent history without reading unrelated event payloads", () => {
     const { db, thread } = setup();
     try {
@@ -417,6 +434,23 @@ describe("slow query index plans", () => {
     expect(details).not.toMatch(/SCAN queued_thread_messages/u);
 
     db.$client.close();
+  });
+
+  it("seeks within a thread's queue for a due unscheduled restart retry", () => {
+    const { db, thread } = setup();
+    try {
+      const captured = captureStatements(db, () => {
+        getDueUnscheduledRestartResume(db, thread.id, 1_000);
+      });
+      expect(captured).toHaveLength(1);
+      const details = queryPlanDetails({ db, ...captured[0]! });
+      expect(details).toMatch(
+        /^SEARCH queued_thread_messages .*\([^)]*\bthread_id=\?(?:\s|\))/mu,
+      );
+      expect(details).not.toMatch(/^SCAN queued_thread_messages\b/mu);
+    } finally {
+      db.$client.close();
+    }
   });
 
   it("finds retryable failed queued messages through the state retry index", () => {

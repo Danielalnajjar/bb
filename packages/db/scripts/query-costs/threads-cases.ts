@@ -1,3 +1,4 @@
+import { RESTART_RESUME_METADATA_KEY } from "@bb/domain";
 import type { DbConnection } from "../../src/connection.js";
 import {
   createPromptHistoryEntry,
@@ -6,11 +7,14 @@ import {
   listStoredThreadPromptHistoryRows,
 } from "../../src/data/prompt-history.js";
 import {
+  getThreadCodexAutoCompactTokenLimit,
   getThreadPluginMetadata,
+  insertThreadCodexAutoCompactTokenLimit,
   insertThreadPluginMetadata,
   listPluginThreadMetadata,
   listThreadPluginMetadataRows,
   patchThreadPluginMetadata,
+  readRestartResumeFacts,
 } from "../../src/data/thread-plugin-metadata.js";
 import {
   markThreadPruningPolicyWork,
@@ -561,6 +565,41 @@ const TAB_CASES: readonly QueryCostCase<ThreadsSeed>[] = [
 ];
 
 const PLUGIN_METADATA_CASES: readonly QueryCostCase<ThreadsSeed>[] = [
+  {
+    name: `${PLUGIN_METADATA}#getThreadCodexAutoCompactTokenLimit`,
+    prepare: (db, _fixture, seed) => {
+      db.transaction((tx) =>
+        insertThreadCodexAutoCompactTokenLimit(
+          tx,
+          seed.pluginMetadataThreadId,
+          200_000,
+        ),
+      );
+    },
+    run: (db, _fixture, seed) =>
+      getThreadCodexAutoCompactTokenLimit(db, seed.pluginMetadataThreadId),
+  },
+  {
+    name: `${PLUGIN_METADATA}#insertThreadCodexAutoCompactTokenLimit`,
+    run: (db, fixture) =>
+      db.transaction((tx) =>
+        insertThreadCodexAutoCompactTokenLimit(tx, fixture.threadId, 180_000),
+      ),
+  },
+  {
+    name: `${PLUGIN_METADATA}#readRestartResumeFacts`,
+    prepare: (db, _fixture, seed) => {
+      insertThreadPluginMetadata(db, {
+        threadId: seed.pluginMetadataThreadId,
+        pluginId: "tasks",
+        metadata: {
+          [RESTART_RESUME_METADATA_KEY]: { hold: false, receiptBacked: true },
+        },
+      });
+    },
+    run: (db, _fixture, seed) =>
+      readRestartResumeFacts(db, seed.pluginMetadataThreadId),
+  },
   {
     name: `${PLUGIN_METADATA}#getThreadPluginMetadata`,
     run: (db, _fixture, seed) =>

@@ -1,10 +1,11 @@
 import {
   getFirstUnclaimedQueuedRetry,
+  hasLiveQueuedRetry,
   hasQueuedRetryOfTurnRequest,
   updateQueuedThreadMessage,
   type QueuedThreadMessageRow,
 } from "@bb/db";
-import { permissionModeSchema } from "@bb/domain";
+import { permissionModeSchema, RESTART_RESUME_RETRY_REASON } from "@bb/domain";
 import type {
   ClientTurnRequestId,
   PermissionMode,
@@ -243,6 +244,13 @@ export async function retryFailedTurn(
   deps: TurnRetryDeps,
   args: RetryFailedTurnArgs,
 ): Promise<RetryTurnResponse> {
+  if (args.request.reason === RESTART_RESUME_RETRY_REASON) {
+    throw new ApiError(
+      400,
+      "retry_reason_reserved",
+      `The reason "${RESTART_RESUME_RETRY_REASON}" is reserved for automatic restart recovery.`,
+    );
+  }
   const failed = requireFailedTurn(deps, {
     thread: args.thread,
     turnRequestId: args.request.turnRequestId,
@@ -251,6 +259,7 @@ export async function retryFailedTurn(
     ...args,
     continuation: CONTINUE_ACCEPTED_TURN_TEXT,
     failed,
+    afterRestart: false,
   });
 }
 
@@ -258,6 +267,13 @@ export async function retryTurnAfterRestart(
   deps: TurnRetryDeps,
   args: RetryFailedTurnArgs & { continuation: string },
 ): Promise<RetryTurnResponse> {
+  if (hasLiveQueuedRetry(deps.db, args.thread.id)) {
+    throw new ApiError(
+      409,
+      "retry_already_queued",
+      `Thread ${args.thread.id} already has a queued retry.`,
+    );
+  }
   if (args.thread.status === "idle") {
     const latest = loadFailedTurn(deps.db, args.thread.id);
     if (latest === null) {
@@ -267,10 +283,11 @@ export async function retryTurnAfterRestart(
         `Thread ${args.thread.id} has no turn to resume.`,
       );
     }
-    return dispatchRetry(deps, { ...args, failed: latest });
+    return dispatchRetry(deps, { ...args, failed: latest, afterRestart: true });
   }
   return dispatchRetry(deps, {
     ...args,
+    afterRestart: true,
     failed: requireFailedTurn(deps, {
       thread: args.thread,
       turnRequestId: args.request.turnRequestId,
@@ -283,6 +300,7 @@ async function dispatchRetry(
   args: RetryFailedTurnArgs & {
     continuation: string;
     failed: FailedTurnRecord;
+    afterRestart: boolean;
   },
 ): Promise<RetryTurnResponse> {
   const { continuation, failed, request, thread } = args;
@@ -300,6 +318,7 @@ async function dispatchRetry(
     );
   }
   if (
+    !args.afterRestart &&
     request.sendAt !== null &&
     wasFailedTurnInputAccepted(deps.db, { threadId: thread.id, failed })
   ) {

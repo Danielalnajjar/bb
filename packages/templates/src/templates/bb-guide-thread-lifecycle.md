@@ -37,6 +37,9 @@ Lifecycle:
     --send-at <when>                       Dispatch at an ISO 8601 timestamp or a duration from now (30s, 10m, 2h, 7d)
     --reason <text>                        Why it is being retried, shown on the queued row
 
+  The reason "bb restarted" is reserved for automatic restart recovery
+  (`retry_reason_reserved`).
+
   Retry re-submits the failed turn by reference: no duplicated user message in
   the timeline, and an attempt number that increments (2 is the first retry).
   What the provider is sent follows its own acceptance record — an input it

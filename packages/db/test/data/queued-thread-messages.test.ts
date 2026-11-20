@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { threadScope, type PromptInput } from "@bb/domain";
+import {
+  encodeClientTurnRequestIdNumber,
+  RESTART_RESUME_METADATA_KEY,
+  RESTART_RESUME_RETRY_REASON,
+  threadScope,
+  type PromptInput,
+} from "@bb/domain";
 import { noopNotifier } from "../../src/notifier.js";
 import { insertEvents } from "../../src/data/events.js";
 import {
@@ -10,6 +16,7 @@ import {
   deleteClaimedQueuedThreadMessageBatchInTransaction,
   deleteQueuedThreadMessage,
   getQueuedThreadMessage,
+  hasLiveQueuedRetry,
   holdQueuedThreadMessageForEdit,
   listDueScheduledQueuedThreadMessages,
   listIdleThreadsWithQueuedMessages,
@@ -25,6 +32,7 @@ import {
 } from "../../src/data/queued-thread-messages.js";
 import { createProject } from "../../src/data/projects.js";
 import { createThread } from "../../src/data/threads.js";
+import { insertThreadPluginMetadata } from "../../src/data/thread-plugin-metadata.js";
 import { upsertHost } from "../../src/data/hosts.js";
 import { createMigratedConnection } from "../../src/testing.js";
 
@@ -78,6 +86,54 @@ function setup() {
 }
 
 describe("queued thread messages", () => {
+  it("keeps both automatic claim paths out of a held restart group but permits explicit send", () => {
+    const { db, thread } = setup();
+    const lead = queueTurnEndMessage(db, thread.id, defaultInput);
+    const restart = createQueuedThreadMessage(db, noopNotifier, {
+      threadId: thread.id,
+      content: altInput,
+      model: "gpt-5",
+      reasoningLevel: "medium",
+      permissionMode: "full",
+      serviceTier: "default",
+      waitingOn: { kind: "thread-busy" },
+      sendAt: null,
+      payload: {
+        kind: "retry",
+        retryOfTurnRequestId: encodeClientTurnRequestIdNumber({ value: 7 }),
+        attempt: 2,
+        reason: RESTART_RESUME_RETRY_REASON,
+      },
+      systemNotice: null,
+    });
+    setQueuedThreadMessageGroupBoundary({
+      db,
+      notifier: noopNotifier,
+      threadId: thread.id,
+      expectedGroupedPrefixQueuedMessageIds: [lead.id, restart.id],
+      groupBoundaryQueuedMessageId: restart.id,
+    });
+    insertThreadPluginMetadata(db, {
+      threadId: thread.id,
+      pluginId: "crew",
+      metadata: { [RESTART_RESUME_METADATA_KEY]: { hold: true } },
+    });
+    const before = listQueuedThreadMessages(db, thread.id);
+    expect(before).toHaveLength(2);
+    expect(claimQueuedThreadMessageGroup(db, noopNotifier, lead.id, {
+      kind: "automatic",
+      isGroupEligible: () => true,
+      retryingFailure: false,
+    })).toBeNull();
+    expect(claimNextQueuedThreadMessageGroup(db, noopNotifier, thread.id, () => true)).toBeNull();
+    expect(listQueuedThreadMessages(db, thread.id)).toEqual(before);
+    expect(hasLiveQueuedRetry(db, thread.id)).toBe(true);
+    expect(hasLiveQueuedRetry(db, thread.id, { ignoreRestartResume: true })).toBe(false);
+    expect(claimQueuedThreadMessageGroup(db, noopNotifier, lead.id, {
+      kind: "explicit-send",
+    })?.map(({ id }) => id)).toEqual([lead.id, restart.id]);
+  });
+
   it("lists an idle thread waiting for its turn to start", () => {
     const { db, project } = setup();
     const thread = createThread(db, noopNotifier, {
@@ -1105,6 +1161,44 @@ describe("queued thread messages", () => {
         kind: "explicit-send",
       })?.map((queuedMessage) => queuedMessage.id),
     ).toEqual([lead.id, tail.id]);
+  });
+
+  it("reports only the rows whose waits were actually replaced on requeue", () => {
+    const { db, thread } = setup();
+    const lead = queueTurnEndMessage(db, thread.id, defaultInput);
+    const tail = queueTurnEndMessage(db, thread.id, altInput);
+    setQueuedThreadMessageGroupBoundary({
+      db,
+      notifier: noopNotifier,
+      threadId: thread.id,
+      expectedGroupedPrefixQueuedMessageIds: [lead.id, tail.id],
+      groupBoundaryQueuedMessageId: tail.id,
+    });
+    const claimed = claimNextQueuedThreadMessageGroup(
+      db,
+      noopNotifier,
+      thread.id,
+      () => true,
+    );
+    expect(claimed?.map((row) => row.id)).toEqual([lead.id, tail.id]);
+    releaseQueuedMessageClaim(db, noopNotifier, {
+      id: tail.id,
+      claimToken: claimed![1]!.claimToken,
+    });
+    const tailBefore = getQueuedThreadMessage(db, tail.id);
+    const onRequeued = vi.fn();
+
+    const result = requeueClaimedQueuedThreadMessages(db, noopNotifier, {
+      claims: claimed!.map(({ id, claimToken }) => ({ id, claimToken })),
+      threadId: thread.id,
+      waitingOn: { kind: "plugin", pluginId: "limits", reason: "At capacity" },
+      sendAt: null,
+      onRequeued,
+    });
+
+    expect(result).toMatchObject({ id: lead.id, waitHolder: "plugin:limits" });
+    expect(onRequeued).toHaveBeenCalledExactlyOnceWith([result]);
+    expect(getQueuedThreadMessage(db, tail.id)).toEqual(tailBefore);
   });
 
   it("claims only the selected message when sending outside the lead group", () => {
