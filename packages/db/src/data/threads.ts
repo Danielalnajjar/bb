@@ -44,7 +44,11 @@ import {
 import { createThreadId } from "../ids.js";
 import { NON_TERMINAL_SESSION_STATUSES } from "./terminal-sessions.js";
 import { createOrderKeyBetween } from "./order-keys.js";
-import { insertThreadPluginMetadata } from "./thread-plugin-metadata.js";
+import {
+  getThreadCodexAutoCompactTokenLimit,
+  insertThreadCodexAutoCompactTokenLimit,
+  insertThreadPluginMetadata,
+} from "./thread-plugin-metadata.js";
 
 type ThreadWriteConnection = DbConnection | DbTransaction;
 
@@ -326,6 +330,7 @@ export interface CreateThreadInput {
   originKind?: ThreadOriginKind | null;
   originPluginId?: string | null;
   pluginMetadata?: { pluginId: string; metadata: JsonObject } | null;
+  codexAutoCompactTokenLimit?: number;
   startupContext?: string;
   visibility?: ThreadVisibility;
   parentNotifications?: ThreadParentNotifications;
@@ -403,6 +408,7 @@ export function createThread(
         })
         .returning()
         .get();
+      let compactLimit = input.codexAutoCompactTokenLimit;
       if (
         createdThread.originKind === "fork" &&
         createdThread.sourceThreadId !== null
@@ -412,6 +418,13 @@ export function createThread(
           createdThread.sourceThreadId,
           createdThread.id,
         );
+        compactLimit ??= getThreadCodexAutoCompactTokenLimit(
+          tx,
+          createdThread.sourceThreadId,
+        );
+      }
+      if (compactLimit !== undefined) {
+        insertThreadCodexAutoCompactTokenLimit(tx, createdThread.id, compactLimit);
       }
       upsertThreadTitleSearchSegments(tx, {
         threadId: createdThread.id,

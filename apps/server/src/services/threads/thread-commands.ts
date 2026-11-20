@@ -1,5 +1,6 @@
 import {
   environments,
+  getThreadCodexAutoCompactTokenLimit,
   hasStoredSpawnAgentToolCall,
   liveThread,
   threads,
@@ -215,6 +216,10 @@ function toRuntimeExecutionOptions(
     input: args.input,
     providerId: args.providerId,
   });
+  const compactLimit = getThreadCodexAutoCompactTokenLimit(
+    args.deps.db,
+    args.threadId,
+  );
   const providerOptions =
     args.deps.providerRegistry.get(args.providerId)?.deriveProviderOptions({
       threadId: args.threadId,
@@ -222,6 +227,9 @@ function toRuntimeExecutionOptions(
       model: args.execution.model,
       permissionMode,
       ...(promptMode !== undefined ? { promptMode } : {}),
+      ...(compactLimit !== undefined
+        ? { autoCompactTokenLimit: compactLimit }
+        : {}),
     }) ?? {};
   const sessionOptions = resolvePendingThreadSessionOptions(
     args.deps.db,

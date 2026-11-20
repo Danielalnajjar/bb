@@ -86,6 +86,9 @@ export default function plugin(bb: BbPluginApi) {
       return {
         memoryEnabled: context.settings.memoryEnabled !== false,
         providerSubagentsEnabled: context.settings.subagentsDisabled !== true,
+        ...(context.autoCompactTokenLimit !== undefined
+          ? { codexAutoCompactTokenLimit: context.autoCompactTokenLimit }
+          : {}),
       };
     },
     extensionKinds: codexExtensionKinds,

@@ -548,6 +548,7 @@ function releaseSession(session: CodexBridgeSession): Promise<void> {
 const codexProviderOptionsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    codexAutoCompactTokenLimit: z.number().optional(),
     providerSubagentsEnabled: z.boolean().optional(),
     additionalWorkspaceWriteRoots: z.array(z.string()).optional(),
   })
@@ -568,6 +569,9 @@ function decodeCodexOptions(
   return {
     sessionOptions: {
       ...options,
+      ...(decoded.codexAutoCompactTokenLimit !== undefined
+        ? { codexAutoCompactTokenLimit: decoded.codexAutoCompactTokenLimit }
+        : {}),
       ...(decoded.memoryEnabled !== undefined
         ? { memoryEnabled: decoded.memoryEnabled }
         : {}),
@@ -602,6 +606,8 @@ function constructionSignature(
   return JSON.stringify({
     cwd,
     reasoningLevel: sessionOptions.reasoningLevel ?? null,
+    codexAutoCompactTokenLimit:
+      sessionOptions.codexAutoCompactTokenLimit ?? null,
     memoryEnabled: sessionOptions.memoryEnabled ?? null,
     providerSubagentsEnabled: sessionOptions.providerSubagentsEnabled ?? null,
     envHash,

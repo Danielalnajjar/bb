@@ -11,6 +11,8 @@ import type {
 } from "../connection.js";
 import { threadPluginMetadata } from "../schema.js";
 
+const threadExecutionNamespace = "@bb/thread-execution";
+
 export interface ThreadPluginMetadataPatch {
   threadId: string;
   pluginId: string;
@@ -49,6 +51,31 @@ export function getThreadPluginMetadata(
   return metadata === undefined
     ? { metadata: {}, corrupt: true }
     : { metadata, corrupt: false };
+}
+
+export function getThreadCodexAutoCompactTokenLimit(
+  db: DbQueryConnection,
+  threadId: string,
+): number | undefined {
+  const { metadata } = getThreadPluginMetadata(
+    db,
+    threadId,
+    threadExecutionNamespace,
+  );
+  const limit = metadata.codexAutoCompactTokenLimit;
+  return typeof limit === "number" ? limit : undefined;
+}
+
+export function insertThreadCodexAutoCompactTokenLimit(
+  db: DbTransaction,
+  threadId: string,
+  limit: number,
+): void {
+  insertThreadPluginMetadata(db, {
+    threadId,
+    pluginId: threadExecutionNamespace,
+    metadata: { codexAutoCompactTokenLimit: limit },
+  });
 }
 
 export function listThreadPluginMetadataRows(
