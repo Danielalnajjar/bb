@@ -44,7 +44,7 @@ async function readAssistantText(harness: TestAppHarness, threadId: string) {
 
 afterEach(() => vi.useRealTimers());
 
-it.fails("T3 roadmap §2 D1: retries committed daemon event batches after losing HTTP acknowledgments", async () => {
+it("T3 roadmap §2 D1: retries committed daemon event batches after losing HTTP acknowledgments", async () => {
   await withTestHarness(async (harness) => {
     vi.useFakeTimers({
       toFake: [
