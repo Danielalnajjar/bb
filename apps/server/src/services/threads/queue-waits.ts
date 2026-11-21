@@ -354,14 +354,17 @@ export function recordQueuedMessageWait(
  * the row leave the queue rather than a row that is about to.
  */
 export function settleQueueRowsDispatched(
+  hub: DbNotifier,
   rows: readonly ClaimedQueuedThreadMessageRow[],
 ): void {
   for (const row of rows) {
     forgetTurnEndPluginHold(row.threadId, row.id);
   }
   const lead = rows[0];
-  if (lead !== undefined)
+  if (lead !== undefined) {
     emitPluginMessageDispatched(toThreadQueuedMessage(lead));
+    hub.notifyThread(lead.threadId, ["queue-changed"]);
+  }
 }
 
 /**

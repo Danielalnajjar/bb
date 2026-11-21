@@ -1,5 +1,6 @@
 import {
   createQueuedThreadMessage,
+  getQueuedThreadMessage,
   getThread,
   listQueuedThreadMessages,
   listQueuedThreadMessagesForApi,
@@ -7,6 +8,7 @@ import {
   setQueuedThreadMessageGroupBoundary,
 } from "@bb/db";
 import {
+  threadChangedMessageSchema,
   turnRequestEventDataSchema,
   turnScope,
   type ThreadQueuedMessage,
@@ -37,6 +39,7 @@ import { runQueuedMessageDispatch } from "../../src/services/threads/queued-mess
 import { createThreadFromRequest } from "../../src/services/threads/thread-create.js";
 import { retryFailedTurn } from "../../src/services/threads/turn-retry.js";
 import { moveThreadStatus } from "../helpers/thread-status.js";
+import { createMockHubSocket } from "../helpers/mock-hub-socket.js";
 import { createClientTurnRequestId } from "../../src/services/threads/thread-events.js";
 import {
   parseStoredQueuedThreadMessageWaitingOn,
@@ -1311,6 +1314,127 @@ describe("message.dispatch grouped authors", () => {
 });
 
 describe("message.dispatch hooks on the queue drain", () => {
+  it.each(["existing", "pending"] as const)(
+    "notifies a connected Queue panel after dispatch consumes a held message (%s thread)",
+    async (kind) => {
+      await withTestHarness(async (harness) => {
+        const entered = createDeferredPromise<void>();
+        const release = createDeferredPromise<void>();
+        installHooks({
+          "message.dispatch": [
+            {
+              pluginId: "limiter",
+              handler: async ({ queuedMessages }) => {
+                if (queuedMessages.length === 0) {
+                  return { action: "wait", reason: "Preparing admission" };
+                }
+                entered.resolve();
+                await release.promise;
+                return { action: "proceed" };
+              },
+            },
+          ],
+        });
+        const input = textInput("Do the thing");
+        let thread;
+        if (kind === "pending") {
+          const { host, project } = seedDispatchFixture(
+            harness,
+            "host-queue-panel",
+          );
+          thread = await createHookedThread(harness, {
+            hostId: host.id,
+            projectId: project.id,
+          });
+        } else {
+          ({ thread } = seedRunnableThread(harness, {
+            hostId: "host-queue-panel",
+            status: "idle",
+          }));
+          const sent = await harness.app.request(
+            `/api/v1/threads/${thread.id}/send`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ input, mode: "auto" }),
+            },
+          );
+          expect(sent.status).toBe(200);
+          expect(await sent.json()).toMatchObject({ delivery: "queued" });
+        }
+        const queued = onlyQueuedRow(harness, thread.id);
+        const turnsBefore = turnRequests(harness, thread.id).length;
+        const queuePath = `/api/v1/threads/${thread.id}/queued-messages`;
+        const notifications: Array<{
+          state: string | null;
+          inTransaction: boolean;
+        }> = [];
+        const socket = createMockHubSocket();
+        harness.hub.subscribe(
+          {
+            ...socket,
+            send(raw) {
+              const message = threadChangedMessageSchema.safeParse(
+                JSON.parse(raw),
+              );
+              if (
+                message.success &&
+                message.data.id === thread.id &&
+                message.data.changes.includes("queue-changed")
+              ) {
+                notifications.push({
+                  state:
+                    getQueuedThreadMessage(harness.db, queued.id)?.state ??
+                    null,
+                  inTransaction: harness.db.$client.inTransaction,
+                });
+              }
+            },
+          },
+          { kind: "thread-detail", threadId: thread.id },
+        );
+
+        const draining = runQueuedMessageDispatch(harness.deps, {
+          kind: "plugin-recheck",
+        });
+        try {
+          await Promise.race([entered.promise, draining]);
+          expect(notifications).toEqual([
+            { state: "claimed", inTransaction: false },
+          ]);
+          const response = await harness.app.request(queuePath);
+          expect(response.status).toBe(200);
+          expect(await response.json()).toMatchObject([
+            {
+              id: queued.id,
+              waitingOn: { kind: "plugin", reason: "Preparing admission" },
+            },
+          ]);
+          expect(turnRequests(harness, thread.id)).toHaveLength(turnsBefore);
+        } finally {
+          release.resolve();
+          await draining;
+        }
+
+        const response = await harness.app.request(queuePath);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual([]);
+        expect(
+          turnRequests(harness, thread.id)
+            .slice(turnsBefore)
+            .map(
+              ({ data }) =>
+                turnRequestEventDataSchema.parse(JSON.parse(data)).input,
+            ),
+        ).toEqual([input]);
+        expect(notifications).toEqual([
+          { state: "claimed", inTransaction: false },
+          { state: null, inTransaction: false },
+        ]);
+      });
+    },
+  );
+
   it("keeps a plugin's submitted message held by that plugin while an earlier plugin also waits", async () => {
     await withTestHarness(async (harness) => {
       vi.useFakeTimers({ toFake: ["Date"] });
