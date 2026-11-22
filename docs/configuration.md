@@ -256,6 +256,7 @@ change the host-daemon protocol.
 | `BB_EXTERNAL_URL`              | `bb-app env`, or environment                       | Startup-only            | Internet-facing HTTPS base URL for generated public links; the fallback for `machineServerUrl`.                                                                                                                                                                                                                                     |
 | `BB_MARKETPLACE_URL`           | `bb-app env`, or environment                       | Startup-only testing    | Manifest URL of the reserved `bb-community` marketplace. Default `https://getbb.app/marketplace/v2/marketplace.json` (falls back to v1 on 404); a custom URL is requested without fallback. Changes only `bb-community`.                                                                                                            |
 | `BB_SERVER_URL`                | `bb-app config`                                    | Remote CLI/host use     | Server targeted by the standalone `bb` CLI and `host-daemon` commands on this machine. Defaults to `http://127.0.0.1:38886`. It does not change where `npx bb-app` binds.                                                                                                                                                           |
+| `BB_CONNECT_ORIGIN`            | `bb-app config`, env, or `--connect-origin`        | Daemon startup-only     | Trusted Connect cloud origin, separate from `BB_SERVER_URL`. Used for label assignment, machine tunnels, and share URLs. Unset preserves the enrollment/server URL behavior.                                                                                                                                                        |
 | `BB_SERVER_BIND_HOST`          | `bb-app env`, environment, or `--server-bind-host` | Startup-only            | Server listener host: `127.0.0.1` (default) or `0.0.0.0`. Not a `bb-app config` key. See [Startup Flags](#startup-flags).                                                                                                                                                                                                           |
 | `BB_SERVER_PORT`               | `bb-app env`, environment, or `--server-port`      | Startup-only            | HTTP listener port. Defaults to `38886`.                                                                                                                                                                                                                                                                                            |
 | `BB_HOST_DAEMON_PORT`          | `bb-app env`, environment, or `--host-daemon-port` | Startup-only            | Local host-daemon API port. Defaults to `38887`.                                                                                                                                                                                                                                                                                    |
@@ -947,6 +948,31 @@ These secret fields are omitted from `bb-app config list`.
 The Settings → Machines installer assigns each standalone daemon a stable local
 API port, persisted in the machine data directory; its command accepts
 `--host-daemon-port <port>` when an explicit port is needed.
+
+### Host-local Connect origin
+
+When a host daemon connects directly to its BB server, configure its original
+Connect relay origin independently of the transport URL:
+
+```sh
+bb-app --data-dir <machine-data-dir> config set BB_CONNECT_ORIGIN https://owner.getbb.app
+bb-host-daemon --data-dir <machine-data-dir> --server-url https://server.example:444 --connect-origin https://owner.getbb.app
+```
+
+`BB_CONNECT_ORIGIN` is stored as top-level `connectOrigin` in that machine's
+`config.json`; `bb-app config unset BB_CONNECT_ORIGIN` removes it. Precedence is
+`--connect-origin`, then `connectOrigin`, then `BB_CONNECT_ORIGIN` from the local
+environment (including `bb-app env`). Changes apply at the next daemon start.
+Existing service arguments and the transport URL are not rewritten by this setting.
+
+The value must be a bare HTTPS relay origin (`<handle>.<connect-domain>`),
+without user information, path, query or fragment, not an apex or IP address.
+Local Connect development accepts HTTP `<handle>.bb.localhost:<port>` origins
+instead, using the existing local tunnel/share protocol rules.
+When absent, the daemon keeps using its enrollment/server URL, including local
+Connect. This is a host-local trust decision: server sessions,
+machine environment updates and label responses cannot replace it. Label
+assignment does not follow HTTP redirects with the machine credential.
 
 ### Machine environment
 

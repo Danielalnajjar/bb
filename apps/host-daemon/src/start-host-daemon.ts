@@ -170,6 +170,7 @@ export async function startHostDaemon(
     app = await createHostDaemonApp({
       dataDir,
       serverUrl,
+      connectOrigin: hostDaemonConfig.BB_CONNECT_ORIGIN,
       hostKey,
       serverHeaders: options.serverHeaders,
       autoUpdate: options.autoUpdate,

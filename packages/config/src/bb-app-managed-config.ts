@@ -1,3 +1,4 @@
+import { validateConnectOrigin } from "./public-url.js";
 import { join } from "node:path";
 import { providerNativeSkillRootsSchema } from "@bb/domain";
 import { z } from "zod";
@@ -79,6 +80,7 @@ const bbAppManagedConfigBoundarySchema = z
     machineCredential: z.string().min(1).optional(),
     connectMachineId: z.string().min(1).optional(),
     serverUrl: z.string().min(1).optional(),
+    connectOrigin: z.string().min(1).optional(),
   })
   .strict();
 
@@ -190,6 +192,9 @@ export function parseBbAppManagedConfig(
   }
   if (parsed.serverUrl !== undefined) {
     config.serverUrl = parsed.serverUrl;
+  }
+  if (parsed.connectOrigin !== undefined) {
+    config.connectOrigin = validateConnectOrigin(parsed.connectOrigin);
   }
   if (parsed.serverHeaders !== undefined) {
     config.serverHeaders = parsed.serverHeaders;
