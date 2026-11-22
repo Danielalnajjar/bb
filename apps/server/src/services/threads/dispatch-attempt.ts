@@ -842,7 +842,7 @@ async function runDispatchAttempt(
     );
   }
   if (claimed !== null) {
-    settleQueueRowsDispatched(claimed);
+    settleQueueRowsDispatched(deps.hub, claimed);
   }
   return { kind: "dispatched", messageSequence };
 }
@@ -1049,7 +1049,7 @@ async function launchAdmittedThread(
 ): Promise<void> {
   const { claimed, startingThread } = admission;
   if (claimed !== null) {
-    settleQueueRowsDispatched(claimed);
+    settleQueueRowsDispatched(deps.hub, claimed);
   }
   scheduleThreadProvisioningAdvance(deps, startingThread.id);
 }
