@@ -1,3 +1,4 @@
+import { archiveThread } from "@bb/db";
 import {
   encodeClientTurnRequestIdNumber,
   threadScope,
@@ -6,6 +7,7 @@ import {
   type TurnRequestTarget,
 } from "@bb/domain";
 import {
+  threadListResponseSchema,
   threadMessageResponseSchema,
   threadTimelineResponseSchema,
   type TimelineRow,
@@ -271,6 +273,52 @@ describe("thread messages", () => {
         `/api/v1/threads/${thread.id}/messages/7abc`,
       );
       expect(invalid.status).toBe(400);
+    });
+  });
+
+  it("lists archived and active threads across offloaded and synchronous routes", async () => {
+    await withTestHarness(async (harness) => {
+      const { thread } = seedThreadFixture(harness);
+      const { thread: archivedThread } = seedThreadFixture(harness);
+      archiveThread(harness.db, harness.deps.hub, archivedThread.id);
+
+      const allResponse = await harness.app.request("/api/v1/threads");
+      expect(allResponse.status).toBe(200);
+      const allThreads = threadListResponseSchema.parse(
+        await readJson(allResponse),
+      );
+      expect(allThreads.map((entry) => entry.id).sort()).toEqual(
+        [thread.id, archivedThread.id].sort(),
+      );
+
+      const archivedResponse = await harness.app.request(
+        "/api/v1/threads?archived=true",
+      );
+      expect(archivedResponse.status).toBe(200);
+      const archivedThreads = threadListResponseSchema.parse(
+        await readJson(archivedResponse),
+      );
+      expect(archivedThreads.map((entry) => entry.id)).toEqual([
+        archivedThread.id,
+      ]);
+
+      const activeResponse = await harness.app.request(
+        "/api/v1/threads?archived=false",
+      );
+      expect(activeResponse.status).toBe(200);
+      const activeThreads = threadListResponseSchema.parse(
+        await readJson(activeResponse),
+      );
+      expect(activeThreads.map((entry) => entry.id)).toEqual([thread.id]);
+
+      const byIdResponse = await harness.app.request(
+        `/api/v1/threads?threadIds=${archivedThread.id}`,
+      );
+      expect(byIdResponse.status).toBe(200);
+      const byIds = threadListResponseSchema.parse(
+        await readJson(byIdResponse),
+      );
+      expect(byIds.map((entry) => entry.id)).toEqual([archivedThread.id]);
     });
   });
 });

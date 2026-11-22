@@ -9,7 +9,10 @@ import type {
   ThreadReadTask,
 } from "./thread-read-contract.js";
 
-const readers = new WeakMap<DbConnection, ThreadReader>();
+type ThreadReadLane = "heavy" | "list";
+const LIST_READER_CACHE_SIZE_KIB = 32_768;
+
+const readers = new WeakMap<DbConnection, Map<ThreadReadLane, ThreadReader>>();
 const closed = new WeakSet<DbConnection>();
 
 class ThreadReader {
@@ -24,11 +27,18 @@ class ThreadReader {
   private nextId = 0;
   private failure: Error | null = null;
 
-  constructor(private readonly db: DbConnection) {
+  constructor(
+    private readonly db: DbConnection,
+    private readonly lane: ThreadReadLane,
+    cacheSizeKib?: number,
+  ) {
     this.worker = new Worker(threadReadWorkerSource, {
       eval: true,
       execArgv: [],
-      workerData: { moduleUrl: import.meta.url },
+      workerData: {
+        moduleUrl: import.meta.url,
+        ...(cacheSizeKib === undefined ? {} : { cacheSizeKib }),
+      },
     });
     this.worker.on("error", (error) => this.fail(error));
     this.worker.on("messageerror", (error) => this.fail(error));
@@ -48,7 +58,9 @@ class ThreadReader {
             typeof value.result !== "object" ||
             value.result === null ||
             !("kind" in value.result) ||
-            !["outline", "search"].includes(String(value.result.kind))
+            !["outline", "search", "message", "list"].includes(
+              String(value.result.kind),
+            )
           : !("message" in value) || typeof value.message !== "string")
       ) {
         this.fail(new Error("Invalid thread-read worker response"));
@@ -71,7 +83,11 @@ class ThreadReader {
   private fail(error: Error): void {
     if (this.failure !== null) return;
     this.failure = error;
-    if (readers.get(this.db) === this) readers.delete(this.db);
+    const byLane = readers.get(this.db);
+    if (byLane?.get(this.lane) === this) {
+      byLane.delete(this.lane);
+      if (byLane.size === 0) readers.delete(this.db);
+    }
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
     this.worker.unref();
@@ -111,15 +127,28 @@ export function readThreadData(
   task: ThreadReadTask,
 ): Promise<ThreadReadResult> {
   if (closed.has(db)) return Promise.reject(new Error("Thread reader closed"));
-  let reader = readers.get(db);
+  const lane: ThreadReadLane = task.kind === "list" ? "list" : "heavy";
+  let byLane = readers.get(db);
+  if (byLane === undefined) {
+    byLane = new Map();
+    readers.set(db, byLane);
+  }
+  let reader = byLane.get(lane);
   if (reader === undefined) {
-    reader = new ThreadReader(db);
-    readers.set(db, reader);
+    reader = new ThreadReader(
+      db,
+      lane,
+      lane === "list" ? LIST_READER_CACHE_SIZE_KIB : undefined,
+    );
+    byLane.set(lane, reader);
   }
   return reader.read(task);
 }
 
 export async function closeThreadReader(db: DbConnection): Promise<void> {
   closed.add(db);
-  await readers.get(db)?.close();
+  const byLane = readers.get(db);
+  if (byLane === undefined) return;
+  readers.delete(db);
+  await Promise.all([...byLane.values()].map((reader) => reader.close()));
 }
