@@ -5547,6 +5547,37 @@ export function findStoredEditMessageOperationRow(
   );
 }
 
+const prepareThreadHistoryEditAfter = (db: DbQueryConnection) =>
+  db
+    .select({ sequence: events.sequence })
+    .from(events)
+    .where(
+      and(
+        eq(events.threadId, placeholder("threadId")),
+        eq(events.type, "system/operation"),
+        gt(events.sequence, placeholder("afterSequence")),
+        sql`json_extract(${events.data}, '$.operation') = 'edit_message'`,
+        sql`json_extract(${events.data}, '$.status') = 'completed'`,
+        sql`json_extract(${events.data}, '$.metadata.cutoffSequence') <= ${placeholder("cutoffAtOrBeforeSequence")}`,
+      ),
+    )
+    .limit(1)
+    .prepare();
+
+export function hasThreadHistoryEditAfter(
+  db: DbQueryConnection,
+  args: {
+    threadId: string;
+    afterSequence: number;
+    cutoffAtOrBeforeSequence: number;
+  },
+): boolean {
+  return (
+    prepareCachedQuery(db, prepareThreadHistoryEditAfter).get(args) !==
+    undefined
+  );
+}
+
 export function findLatestEditableUserTurnRequestRow(
   db: DbQueryConnection,
   args: { beforeSequence: number | null; threadId: string },

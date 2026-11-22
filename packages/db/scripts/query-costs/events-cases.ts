@@ -13,6 +13,7 @@ import {
 import {
   findLatestEditableUserTurnRequestRow,
   findStoredEditMessageOperationRow,
+  hasThreadHistoryEditAfter,
   hasStoredCancelledThreadProvisioning,
   hasStoredProviderTurnCompletedSince,
   hasStoredThreadInterruptedSince,
@@ -1668,6 +1669,15 @@ export const EVENTS_COST_CASES: readonly QueryCostCase[] = [
     run: (db, fixture) =>
       findStoredEditMessageOperationRow(db, {
         operationId: "edit-operation-not-yet-committed",
+        threadId: fixture.threadId,
+      }),
+  },
+  {
+    name: `${EVENTS}#hasThreadHistoryEditAfter`,
+    run: (db, fixture) =>
+      hasThreadHistoryEditAfter(db, {
+        afterSequence: lastTurn(fixture).completedSequence,
+        cutoffAtOrBeforeSequence: lastTurn(fixture).completedSequence,
         threadId: fixture.threadId,
       }),
   },
