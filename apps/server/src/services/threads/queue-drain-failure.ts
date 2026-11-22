@@ -1,4 +1,6 @@
 import {
+  getLiveQueuedThreadMessageGroup,
+  isRestartResumeQueuedMessage,
   setQueuedThreadMessageFailureReason,
   setQueuedThreadMessageWaitingOn,
 } from "@bb/db";
@@ -11,6 +13,7 @@ import { ApiError } from "../../errors.js";
 import { QUEUED_MESSAGE_RETRY_DELAYS_MS } from "../lib/persisted-retry.js";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import { dispatchEnvironmentAndHost } from "./dispatch-hooks.js";
+import { readLoggedRestartResumeFacts } from "./queue-waits.js";
 import { isParentNotifiableChildThread } from "./thread-parent.js";
 import { queueChildThreadTurnNotificationBestEffort } from "./child-thread-notifications.js";
 
@@ -60,7 +63,19 @@ export function recordQueuedMessageDrainFailure(
     row: { id: string; threadId: string };
     thread: Thread;
   },
-): void {
+): boolean {
+  const group = getLiveQueuedThreadMessageGroup(
+    deps.db,
+    args.row.threadId,
+    args.row.id,
+  );
+  if (
+    group?.some(isRestartResumeQueuedMessage) &&
+    readLoggedRestartResumeFacts(deps, args.row.threadId).hold !== null
+  ) {
+    return false;
+  }
+
   const { host } = dispatchEnvironmentAndHost(deps, args.thread.environmentId);
   if (host !== null && !deps.hub.hasDaemonForHost(host.id)) {
     setQueuedThreadMessageWaitingOn(deps.db, deps.hub, {
@@ -68,7 +83,7 @@ export function recordQueuedMessageDrainFailure(
       threadId: args.row.threadId,
       waitingOn: { kind: "host-offline", hostName: host.name },
     });
-    return;
+    return true;
   }
 
   const updated = setQueuedThreadMessageFailureReason(deps.db, deps.hub, {
@@ -91,4 +106,5 @@ export function recordQueuedMessageDrainFailure(
       failureContext: "could not send a queued message after retrying",
     });
   }
+  return true;
 }

@@ -101,6 +101,7 @@ export async function installTestBuiltinPlugin(
 
 export type TestAppHarnessConfigOverrides = Partial<ServerRuntimeConfig> & {
   fileBackedDb?: boolean;
+  storage?: { dataDir: string; db: DbConnection };
   appUpdateService?: AppUpdateService;
   cliCommandService?: CliCommandService;
   terminalAttachTimeoutMs?: number;
@@ -175,12 +176,14 @@ export async function createTestAppHarness(
     nativeRootsClock,
     liveCommandsClock,
     seedFirstPartyProviders = true,
+    storage,
     ...configOverrides
   } = overrides;
   const logger = createTestLogger();
-  const dataDir = await mkdtemp(join(tmpdir(), "bb-server-test-"));
-  let db = createTestDb();
-  if (fileBackedDb) {
+  const dataDir =
+    storage?.dataDir ?? (await mkdtemp(join(tmpdir(), "bb-server-test-")));
+  let db = storage?.db ?? createTestDb();
+  if (storage === undefined && fileBackedDb) {
     const filename = join(dataDir, "test.db");
     try {
       await writeFile(filename, db.$client.serialize());
@@ -410,13 +413,15 @@ export async function createTestAppHarness(
       setPluginEnvironmentProviderBridge(undefined);
       await pluginService.stop();
       await walCheckpointer.stop();
-      if (fileBackedDb) db.$client.close();
-      await rm(dataDir, {
-        recursive: true,
-        force: true,
-        maxRetries: 10,
-        retryDelay: 50,
-      });
+      if (storage === undefined && fileBackedDb) db.$client.close();
+      if (storage === undefined) {
+        await rm(dataDir, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 50,
+        });
+      }
     },
   };
 }

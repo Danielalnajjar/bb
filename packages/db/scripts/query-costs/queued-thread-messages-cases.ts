@@ -1,4 +1,7 @@
-import { encodeClientTurnRequestIdNumber } from "@bb/domain";
+import {
+  encodeClientTurnRequestIdNumber,
+  RESTART_RESUME_RETRY_REASON,
+} from "@bb/domain";
 import { inArray } from "drizzle-orm";
 import type { DbConnection } from "../../src/connection.js";
 import {
@@ -11,7 +14,9 @@ import {
   deleteCoalescedQueuedThreadMessageInTransaction,
   deleteQueuedRetriesForThreadEventSuffixInTransaction,
   deleteQueuedThreadMessage,
+  getDueUnscheduledRestartResume,
   getFirstUnclaimedQueuedRetry,
+  getLiveQueuedThreadMessageGroup,
   getPendingCoalescedQueuedThreadMessage,
   getQueuedThreadMessage,
   getQueuedThreadStartMessage,
@@ -32,6 +37,7 @@ import {
   listRetryableFailedQueuedThreadMessages,
   listThreadIdsWithAppUpdateQueueWaits,
   listThreadIdsWithHostOfflineQueueWaits,
+  listThreadQueuedMessagesIncludingClaims,
   moveQueuedThreadMessageToFrontInTransaction,
   releaseQueuedMessageClaim,
   releaseQueuedThreadMessageEditHold,
@@ -261,6 +267,34 @@ export const QUEUED_THREAD_MESSAGES_COST_CASES: readonly QueryCostCase[] = [
       fillQueues(db, fixture);
     },
     run: (db, fixture) => listQueuedThreadMessages(db, fixture.threadId),
+  },
+  {
+    name: `${QUEUED}#getLiveQueuedThreadMessageGroup`,
+    prepare: (db, fixture) => {
+      const claimed = claimQueuedThreadMessageGroup(
+        db,
+        noopNotifier,
+        fixture.queuedMessageId,
+        { kind: "explicit-send" },
+      );
+      if (claimed === null)
+        throw new Error("Expected a claimed queued message");
+      groupQueueHead(db, fixture);
+    },
+    run: (db, fixture) =>
+      getLiveQueuedThreadMessageGroup(
+        db,
+        fixture.threadId,
+        fixture.queuedRetryId,
+      ),
+  },
+  {
+    name: `${QUEUED}#listThreadQueuedMessagesIncludingClaims`,
+    prepare: (db, fixture) => {
+      claimLeadGroup(db, fixture);
+    },
+    run: (db, fixture) =>
+      listThreadQueuedMessagesIncludingClaims(db, fixture.threadId),
   },
   {
     name: `${QUEUED}#getQueuedThreadStartMessage`,
@@ -526,6 +560,22 @@ export const QUEUED_THREAD_MESSAGES_COST_CASES: readonly QueryCostCase[] = [
       fillQueues(db, fixture);
     },
     run: (db, fixture) => hasLiveQueuedRetry(db, fixture.threadId),
+  },
+  {
+    name: `${QUEUED}#getDueUnscheduledRestartResume`,
+    prepare: (db, fixture) => {
+      fillQueues(db, fixture);
+      enqueue(db, fixture.threadId, {
+        payload: {
+          kind: "retry",
+          retryOfTurnRequestId: fixture.pendingRequestId,
+          attempt: 1,
+          reason: RESTART_RESUME_RETRY_REASON,
+        },
+      });
+    },
+    run: (db, fixture) =>
+      getDueUnscheduledRestartResume(db, fixture.threadId, Date.now()),
   },
   {
     name: `${QUEUED}#moveQueuedThreadMessageToFrontInTransaction`,

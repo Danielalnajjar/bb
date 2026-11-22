@@ -3,6 +3,7 @@ import {
   getAppSettings,
   getThread,
   getUnfinishedCommandItemData,
+  hasLiveQueuedRetry,
   listCommandItemDataByItemIds,
   listOpenBackgroundTaskItemRowsForHost,
   listLiveThreadStatusesOnHost,
@@ -17,6 +18,11 @@ import { renderTemplate } from "@bb/templates";
 import { ApiError } from "../../errors.js";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import { queueChildThreadTurnNotificationBestEffort } from "./child-thread-notifications.js";
+import {
+  assertRestartResumeNotHeld,
+  QUEUED_MESSAGE_RESTART_RESUME_HELD_CODE,
+  readLoggedRestartResumeFacts,
+} from "./queue-waits.js";
 import { isParentNotifiableChildThread } from "./thread-parent.js";
 import {
   loadFailedTurn,
@@ -150,30 +156,39 @@ function namedJobs(lead: string, jobs: readonly string[]): string {
 function cutTurnContinuation(args: {
   command: string | null;
   jobs: readonly string[];
+  receiptBacked: boolean;
 }): string {
   const cut =
     args.command === null
       ? "while you were working. The restart cut off your turn, not the user, even if your history says the user rejected it. Check whether your last step finished, then continue the task without repeating work."
       : `while you were running \`${args.command}\`. The restart cut it off, not the user, even if your history says the user rejected it. Check what it finished, then continue the task, rerunning it only if that is safe.`;
-  if (args.jobs.length === 0) {
-    return renderTemplate("systemMessageRestartResume", { details: cut });
-  }
+  const receiptBacked = args.receiptBacked ? "true" : "";
+  if (args.jobs.length === 0)
+    return renderTemplate("systemMessageRestartResume", {
+      details: cut,
+      receiptBacked,
+    });
   const check =
     args.jobs.length === 1
       ? "Check how far it got, and restart it only if that is safe."
       : "Check how far each got, and restart only what is safe to restart.";
   return renderTemplate("systemMessageRestartResume", {
     details: `${cut} ${namedJobs("It also stopped this background work", args.jobs)}${check}`,
+    receiptBacked,
   });
 }
 
-function stoppedBackgroundWorkContinuation(jobs: readonly string[]): string {
+function stoppedBackgroundWorkContinuation(
+  jobs: readonly string[],
+  receiptBacked: boolean,
+): string {
   const check =
     jobs.length === 1
       ? "The user didn't stop it. Check whether it's still running and how far it got, then restart it only if that is safe."
       : "The user didn't stop them. Check whether each is still running and how far it got, then restart each only if that is safe.";
   return renderTemplate("systemMessageRestartResume", {
     details: `${namedJobs("and may have stopped this background work", jobs)}${check}`,
+    receiptBacked: receiptBacked ? "true" : "",
   });
 }
 
@@ -229,6 +244,21 @@ export function planRestartResumes(
     ) {
       continue;
     }
+    const { hold, receiptBacked } = readLoggedRestartResumeFacts(deps, id);
+    if (hold !== null) {
+      deps.logger.info(
+        { threadId: id, pluginId: hold.pluginId },
+        "Not resuming a thread a plugin holds",
+      );
+      continue;
+    }
+    if (hasLiveQueuedRetry(deps.db, id)) {
+      deps.logger.info(
+        { threadId: id },
+        "Not resuming a thread that already has a queued retry",
+      );
+      continue;
+    }
     if (
       status === "active" &&
       deps.pendingInteractions.hasTurnBoundPendingThreadInteraction(id)
@@ -259,7 +289,10 @@ export function planRestartResumes(
       continue;
     }
     if (status === "idle") {
-      continuations.set(id, stoppedBackgroundWorkContinuation(jobs));
+      continuations.set(
+        id,
+        stoppedBackgroundWorkContinuation(jobs, receiptBacked),
+      );
       continue;
     }
     const commandData = getUnfinishedCommandItemData(deps.db, {
@@ -271,6 +304,7 @@ export function planRestartResumes(
       cutTurnContinuation({
         command: commandData === null ? null : readCommand(commandData),
         jobs,
+        receiptBacked,
       }),
     );
   }
@@ -297,6 +331,7 @@ export async function queueRestartResumes(
       continue;
     }
     try {
+      assertRestartResumeNotHeld(deps, threadId);
       const result = await retryTurnAfterRestart(deps, {
         continuation,
         thread,
@@ -315,33 +350,43 @@ export async function queueRestartResumes(
         },
         "Queued a resume for a thread a restart cut off",
       );
+      continue;
     } catch (error) {
-      if (
-        error instanceof ApiError &&
-        error.body.code === "retry_already_queued"
-      ) {
+      const code = error instanceof ApiError ? error.body.code : null;
+      if (code === "retry_already_queued") {
+        deps.logger.info(
+          { threadId },
+          "Not resuming a thread that already has a queued retry",
+        );
         continue;
       }
-      deps.logger.warn(
-        { err: error, threadId },
-        "Could not queue a resume for a thread a restart cut off",
-      );
-      const interruptedTurnId = interruptedTurnIdByThreadId.get(threadId);
-      const current = getThread(deps.db, threadId);
-      if (
-        interruptedTurnId !== undefined &&
-        interruptedTurnId !== null &&
-        current !== null &&
-        isParentNotifiableChildThread(current, "interrupted")
-      ) {
-        await queueChildThreadTurnNotificationBestEffort(deps, {
-          childThread: current,
-          parentThreadId: current.parentThreadId,
-          turnStatus: "interrupted",
-          turnId: interruptedTurnId,
-          interruption: { reason: "host-daemon-restarted" },
-        });
+      if (code === QUEUED_MESSAGE_RESTART_RESUME_HELD_CODE) {
+        deps.logger.info(
+          { threadId },
+          "Not queuing a resume for a thread a plugin holds",
+        );
+      } else {
+        deps.logger.warn(
+          { err: error, threadId },
+          "Could not queue a resume for a thread a restart cut off",
+        );
       }
+    }
+    const interruptedTurnId = interruptedTurnIdByThreadId.get(threadId);
+    const current = getThread(deps.db, threadId);
+    if (
+      interruptedTurnId !== undefined &&
+      interruptedTurnId !== null &&
+      current !== null &&
+      isParentNotifiableChildThread(current, "interrupted")
+    ) {
+      await queueChildThreadTurnNotificationBestEffort(deps, {
+        childThread: current,
+        parentThreadId: current.parentThreadId,
+        turnStatus: "interrupted",
+        turnId: interruptedTurnId,
+        interruption: { reason: "host-daemon-restarted" },
+      });
     }
   }
 }

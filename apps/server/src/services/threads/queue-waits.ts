@@ -1,14 +1,22 @@
 import {
+  afterCommit,
   moveQueuedThreadMessageToFrontInTransaction,
   clearQueuedThreadMessageWaitingOn,
   createQueuedThreadMessageInTransaction,
+  getQueuedThreadMessage,
+  getThread,
+  isOrdinaryTurnEndQueuedMessage,
+  noopNotifier,
+  readRestartResumeFacts,
   requeueClaimedQueuedThreadMessages,
+  setQueuedThreadMessageWaitingOn,
   type ClaimedQueuedThreadMessageRow,
   type DbConnection,
   type DbNotifier,
   type DbQueryConnection,
   type QueuedThreadMessageRow,
 } from "@bb/db";
+import { isRestartResumeRetry } from "@bb/domain";
 import type {
   PromptInput,
   QueuedMessageDeliveryMode,
@@ -22,6 +30,7 @@ import type {
   ThreadQueuedMessage,
 } from "@bb/domain";
 import { ApiError } from "../../errors.js";
+import type { AppDeps } from "../../types.js";
 import {
   emitPluginMessageDispatched,
   emitPluginMessageQueued,
@@ -29,11 +38,139 @@ import {
 import { toThreadQueuedMessage } from "./thread-queued-messages.js";
 import { assertThreadHostAcceptsWork } from "./thread-host-admission.js";
 
-type QueueWaitDeps = { db: DbQueryConnection; hub: DbNotifier };
+type QueueWaitDeps = {
+  db: DbQueryConnection;
+  hub: DbNotifier & Partial<Pick<AppDeps["hub"], "onChangedMessage">>;
+  logger?: AppDeps["logger"];
+};
+
+export type TurnEndPluginHoldKind = "thread-busy" | "stopping";
+type TurnEndPluginHold = Pick<
+  QueuedThreadMessageRow,
+  "waitingOn" | "sendAt" | "recheckAt"
+> & {
+  kind: TurnEndPluginHoldKind;
+};
+
+const turnEndPluginHolds = new Map<string, Map<string, TurnEndPluginHold>>();
+const observedQueueHubs = new WeakSet<QueueWaitDeps["hub"]>();
+
+function forgetTurnEndPluginHold(threadId: string, id: string): void {
+  const holds = turnEndPluginHolds.get(threadId);
+  if (holds?.delete(id) && holds.size === 0) {
+    turnEndPluginHolds.delete(threadId);
+  }
+}
+
+function currentTurnEndPluginHold(
+  row: QueuedThreadMessageRow,
+): TurnEndPluginHold | undefined {
+  const hold = turnEndPluginHolds.get(row.threadId)?.get(row.id);
+  return hold !== undefined &&
+    row.waitHolder !== null &&
+    row.waitingOn === hold.waitingOn &&
+    row.sendAt === hold.sendAt &&
+    row.recheckAt === hold.recheckAt
+    ? hold
+    : undefined;
+}
+
+function recordTurnEndPluginHold(
+  deps: QueueWaitDeps,
+  row: QueuedThreadMessageRow,
+  kind: TurnEndPluginHoldKind | null,
+): void {
+  if (kind === null) {
+    forgetTurnEndPluginHold(row.threadId, row.id);
+    return;
+  }
+  const holds = turnEndPluginHolds.get(row.threadId) ?? new Map();
+  holds.set(row.id, {
+    kind,
+    waitingOn: row.waitingOn,
+    sendAt: row.sendAt,
+    recheckAt: row.recheckAt,
+  });
+  turnEndPluginHolds.set(row.threadId, holds);
+
+  const { db, hub } = deps;
+  if (hub.onChangedMessage === undefined || observedQueueHubs.has(hub)) return;
+  observedQueueHubs.add(hub);
+  hub.onChangedMessage((message) => {
+    if (message.entity !== "thread") return;
+    if (message.changes.includes("thread-deleted")) {
+      turnEndPluginHolds.delete(message.id);
+      return;
+    }
+    if (!message.changes.includes("queue-changed")) return;
+    const holds = turnEndPluginHolds.get(message.id);
+    if (holds === undefined) return;
+    for (const id of holds.keys()) {
+      const current = getQueuedThreadMessage(db, id);
+      if (current === null || currentTurnEndPluginHold(current) === undefined) {
+        forgetTurnEndPluginHold(message.id, id);
+      }
+    }
+  });
+}
+
+export function isOrdinaryTurnEndPluginHold(
+  row: QueuedThreadMessageRow,
+): boolean {
+  const hold = currentTurnEndPluginHold(row);
+  return hold !== undefined && isOrdinaryTurnEndQueuedMessage(row, hold.kind);
+}
+
+export function isTurnEndPluginHoldReady(
+  deps: Pick<QueueWaitDeps, "db">,
+  threadId: string,
+): boolean {
+  if (!turnEndPluginHolds.has(threadId)) return false;
+  const thread = getThread(deps.db, threadId);
+  return (
+    thread !== null &&
+    thread.status !== "active" &&
+    thread.status !== "stopping"
+  );
+}
+
+export function releaseTurnEndPluginHolds(
+  deps: { db: DbConnection; hub: DbNotifier },
+  threadId: string,
+): number {
+  const holds = turnEndPluginHolds.get(threadId);
+  if (holds === undefined || !isTurnEndPluginHoldReady(deps, threadId))
+    return 0;
+  let released = 0;
+  for (const id of holds.keys()) {
+    const row = getQueuedThreadMessage(deps.db, id);
+    const hold = row === null ? undefined : currentTurnEndPluginHold(row);
+    if (row === null || hold === undefined) {
+      forgetTurnEndPluginHold(threadId, id);
+      continue;
+    }
+    if (row.state !== "waiting" && row.state !== "scheduled") {
+      continue;
+    }
+    const updated = setQueuedThreadMessageWaitingOn(deps.db, noopNotifier, {
+      id,
+      threadId,
+      waitingOn: { kind: hold.kind },
+    });
+    if (updated !== null) {
+      forgetTurnEndPluginHold(threadId, id);
+      released++;
+    }
+  }
+  if (released > 0) deps.hub.notifyThread(threadId, ["queue-changed"]);
+  return released;
+}
 
 export const QUEUED_MESSAGE_CLAIM_LOST_CODE = "queued_message_claim_lost";
 export const QUEUED_MESSAGE_AUTO_SEND_PAUSED_CODE =
   "queued_message_auto_send_paused";
+export const QUEUED_MESSAGE_RESTART_RESUME_HELD_CODE =
+  "queued_message_restart_resume_held";
 
 export function createQueuedMessageClaimLostError(): ApiError {
   return new ApiError(
@@ -51,15 +188,41 @@ export function createQueuedMessageAutoSendPausedError(): ApiError {
   );
 }
 
-/**
- * A settling row, for the plugin event its transition raises.
- *
- * A wait is narrated by the queue rows above the composer, which read the
- * row's own columns — so a settle has nothing to write down, only somebody to
- * tell.
- */
-export interface SettleQueueRowArgs {
-  row: QueuedThreadMessageRow;
+export function createQueuedRestartResumeHeldError(): ApiError {
+  return new ApiError(
+    409,
+    QUEUED_MESSAGE_RESTART_RESUME_HELD_CODE,
+    "A plugin is holding this restart continuation",
+  );
+}
+
+export function logInvalidRestartResumeMetadata(
+  logger: AppDeps["logger"] | undefined,
+  threadId: string,
+  pluginId: string,
+): void {
+  logger?.warn(
+    { threadId, pluginId },
+    "Ignoring invalid restart resume metadata",
+  );
+}
+
+export function readLoggedRestartResumeFacts(
+  deps: Pick<QueueWaitDeps, "db" | "logger">,
+  threadId: string,
+): ReturnType<typeof readRestartResumeFacts> {
+  return readRestartResumeFacts(deps.db, threadId, (pluginId) =>
+    logInvalidRestartResumeMetadata(deps.logger, threadId, pluginId),
+  );
+}
+
+export function assertRestartResumeNotHeld(
+  deps: Pick<QueueWaitDeps, "db" | "logger">,
+  threadId: string,
+): void {
+  if (readLoggedRestartResumeFacts(deps, threadId).hold !== null) {
+    throw createQueuedRestartResumeHeldError();
+  }
 }
 
 /** The message a queued row will carry, as the queueing site supplies it. */
@@ -85,6 +248,7 @@ export interface RecordQueuedMessageWaitArgs {
   message: QueuedDispatchMessage;
   placement: "back" | "front";
   waitingOn: QueuedMessageWaitingOn;
+  turnEndWait?: TurnEndPluginHoldKind | null;
   /**
    * The sender's time, while it is still ahead. Passed every time the wait is
    * written rather than left alone, because writing a wait is a fresh
@@ -125,6 +289,12 @@ export function recordQueuedMessageWait(
   if (leadClaim === undefined) {
     row = deps.db.transaction(
       (tx) => {
+        if (isRestartResumeRetry(args.message.payload)) {
+          assertRestartResumeNotHeld(
+            { db: tx, logger: deps.logger },
+            args.thread.id,
+          );
+        }
         assertThreadHostAcceptsWork(tx, args.thread);
         const created = createQueuedThreadMessageInTransaction(tx, {
           threadId: args.thread.id,
@@ -150,6 +320,10 @@ export function recordQueuedMessageWait(
       },
       { behavior: "immediate" },
     );
+    const written = row;
+    afterCommit(deps.db, () => {
+      recordTurnEndPluginHold(deps, written, args.turnEndWait ?? null);
+    });
   } else {
     row = requeueClaimedQueuedThreadMessages(deps.db, deps.hub, {
       claims: claimed.map((claim) => ({
@@ -160,6 +334,11 @@ export function recordQueuedMessageWait(
       waitingOn: args.waitingOn,
       sendAt: args.sendAt,
       recheckAt: args.recheckAt,
+      onRequeued: (rows) => {
+        for (const row of rows) {
+          recordTurnEndPluginHold(deps, row, args.turnEndWait ?? null);
+        }
+      },
     });
   }
 
@@ -179,8 +358,15 @@ export function recordQueuedMessageWait(
  * AFTER the row is consumed, so a plugin listening on `message.dispatched` sees
  * the row leave the queue rather than a row that is about to.
  */
-export function settleQueueRowDispatched(args: SettleQueueRowArgs): void {
-  emitPluginMessageDispatched(toThreadQueuedMessage(args.row));
+export function settleQueueRowsDispatched(
+  rows: readonly ClaimedQueuedThreadMessageRow[],
+): void {
+  for (const row of rows) {
+    forgetTurnEndPluginHold(row.threadId, row.id);
+  }
+  const lead = rows[0];
+  if (lead !== undefined)
+    emitPluginMessageDispatched(toThreadQueuedMessage(lead));
 }
 
 /**

@@ -52,6 +52,7 @@ export * from "./raw-thread-id.js";
 export * from "./reasoning-efforts.js";
 export * from "./reasoning-level.js";
 export * from "./retry.js";
+export * from "./restart-resume.js";
 export * from "./setup-script.js";
 export * from "./server-move.js";
 export * from "./service-tier.js";

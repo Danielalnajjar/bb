@@ -1,3 +1,4 @@
+import { RESTART_RESUME_METADATA_KEY } from "@bb/domain";
 import type { DbConnection } from "../../src/connection.js";
 import {
   createPromptHistoryEntry,
@@ -13,6 +14,7 @@ import {
   listPluginThreadMetadata,
   listThreadPluginMetadataRows,
   patchThreadPluginMetadata,
+  readRestartResumeFacts,
 } from "../../src/data/thread-plugin-metadata.js";
 import {
   markThreadPruningPolicyWork,
@@ -654,6 +656,20 @@ const PLUGIN_METADATA_CASES: readonly QueryCostCase<ThreadsSeed>[] = [
       db.transaction((tx) =>
         insertThreadCodexAutoCompactTokenLimit(tx, fixture.threadId, 180_000),
       ),
+  },
+  {
+    name: `${PLUGIN_METADATA}#readRestartResumeFacts`,
+    prepare: (db, _fixture, seed) => {
+      insertThreadPluginMetadata(db, {
+        threadId: seed.pluginMetadataThreadId,
+        pluginId: "tasks",
+        metadata: {
+          [RESTART_RESUME_METADATA_KEY]: { hold: false, receiptBacked: true },
+        },
+      });
+    },
+    run: (db, _fixture, seed) =>
+      readRestartResumeFacts(db, seed.pluginMetadataThreadId),
   },
   {
     name: `${PLUGIN_METADATA}#getThreadPluginMetadata`,

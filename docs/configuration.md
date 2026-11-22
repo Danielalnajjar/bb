@@ -495,8 +495,10 @@ Resume interrupted threads after a restart is available in Settings → General 
     background command its agent was waiting on (the retry re-runs the
     thread's latest turn).
 
-  The retry is the same row as `bb thread retry`, titled "Resume after bb
-  restarted" in the app's queue and in `bb thread queue list`. When the provider had
+  The reason "bb restarted" is reserved for automatic restart recovery and
+  cannot be supplied to `bb thread retry --reason`. The retry is the same row
+  as `bb thread retry`, titled "Resume after bb restarted" in the app's queue
+  and in `bb thread queue list`. When the provider had
   accepted the turn's input, it sends an agent-only message instead of
   "Please continue.": it says bb restarted, names the command the turn was
   running and any background work the restart stopped (command and
@@ -509,6 +511,12 @@ Resume interrupted threads after a restart is available in Settings → General 
   attempt 4 (three restarts in a row). A child thread that resumes does not notify its parent
   that it was interrupted; the parent hears when the child finishes.
   `bb thread wait` keeps waiting on a thread whose resume is queued.
+
+  A plugin can hold a thread's automatic restart resume. If the hold is already
+  in place, bb does not queue a continuation. If it starts after a continuation
+  was queued, the retry stays queued without changing its schedule. Clearing the
+  last hold makes the retry eligible for automatic dispatch again; **Send now**
+  overrides the hold. This does not pause ordinary messages or retries.
   Updating bb counts as a restart, so threads that Update now (or
   `bb updates app apply --yes`) cuts resume after the update. With the
   setting on, the Update now dialog, the CLI prompt, and the
@@ -520,10 +528,11 @@ Resume interrupted threads after a restart is available in Settings → General 
   queued, the queue does not automatically send the thread's other rows; one
   that comes up is re-queued as `thread-busy` and sends after the retry's turn
   ends. That is what keeps messages queued or steered while the daemon was down
-  behind the resume. Without the experiment, a `--send-at` message or a row a
-  plugin releases can go out ahead of a retry scheduled for later (for example
-  a provider-retry row waiting hours for a subscription window) and overtake
-  it; with it, those rows wait for the retry.
+  behind the resume. A held restart retry does not block other rows through
+  retry priority, but an ordinary live retry still does. Without the experiment,
+  a `--send-at` message or a row a plugin releases can go out ahead of a retry
+  scheduled for later (for example a provider-retry row waiting hours for a
+  subscription window) and overtake it; with it, those rows wait for the retry.
 
 ## AI services
 

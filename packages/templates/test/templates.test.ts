@@ -7,6 +7,29 @@ import {
 import { templateDefinitions } from "../src/generated/templates.generated.js";
 
 describe("@bb/templates", () => {
+  it("keeps the restart prompt unchanged unless a receipt check is requested", () => {
+    const details =
+      "while you were working. Check whether your last step finished.";
+    const unchanged = `[bb system]\n\nbb restarted ${details}`;
+    expect(renderTemplate("systemMessageRestartResume", { details })).toBe(
+      unchanged,
+    );
+    expect(
+      renderTemplate("systemMessageRestartResume", {
+        details,
+        receiptBacked: "",
+      }),
+    ).toBe(unchanged);
+    expect(
+      renderTemplate("systemMessageRestartResume", {
+        details,
+        receiptBacked: "true",
+      }),
+    ).toBe(
+      `${unchanged}\n\nBefore continuing, check \`git status\` and the receipt named in your existing instructions.`,
+    );
+  });
+
   it("documents project creation machine routing", () => {
     const guide = renderTemplate("bbGuideProjects", {});
 
