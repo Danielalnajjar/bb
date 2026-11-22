@@ -18,8 +18,8 @@ import {
   listPluginThreadMetadata,
   listThreadAncestors,
   listThreadDescendants,
-  searchThreadsWithPendingInteractionState,
   updateThread,
+  type ListThreadsOptions,
   type ThreadSearchResultGroup as DbThreadSearchResultGroup,
   type UpdateThreadInput,
 } from "@bb/db";
@@ -48,6 +48,7 @@ import {
 import type { Hono } from "hono";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
+import { readThreadData } from "../../services/threads/thread-reads.js";
 import {
   parseInteger,
   parsePaginationQuery,
@@ -306,7 +307,7 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
     );
   });
 
-  get(routes.list, (context, query) => {
+  get(routes.list, async (context, query) => {
     const { limit, offset } = parsePaginationQuery({
       limit: query.limit,
       offset: query.offset,
@@ -324,7 +325,7 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
     if (query.sectionId) {
       requireThreadSection(deps, query.sectionId);
     }
-    const threads = listThreadsWithPendingInteractionState(deps.db, {
+    const listOptions: ListThreadsOptions = {
       ...(query.projectId ? { projectId: query.projectId } : {}),
       ...(query.environmentId ? { environmentId: query.environmentId } : {}),
       ...(query.hostId ? { hostId: query.hostId } : {}),
@@ -344,13 +345,24 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
         query.hasParent === undefined ? undefined : query.hasParent === "true",
       ...(limit !== undefined ? { limit } : {}),
       ...(offset !== undefined ? { offset } : {}),
-    });
+    };
+    let threads;
+    if (listOptions.archived !== false && listOptions.threadIds === undefined) {
+      const result = await readThreadData(deps.db, {
+        kind: "list",
+        options: listOptions,
+      });
+      if (result.kind !== "list") throw new Error("Unexpected list response");
+      threads = result.threads;
+    } else {
+      threads = listThreadsWithPendingInteractionState(deps.db, listOptions);
+    }
     return context.json(
       toThreadListEntryResponses(deps, { threads }) satisfies ThreadListEntry[],
     );
   });
 
-  get(routes.search, (context, query) => {
+  get(routes.search, async (context, query) => {
     const searchQuery = query.query.trim();
     if (countNonWhitespaceChars(searchQuery) < 2) {
       throw new ApiError(
@@ -360,13 +372,17 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
       );
     }
     const limitPerGroup = parseSearchLimitPerGroup(query.limitPerGroup);
+    const result = await readThreadData(deps.db, {
+      kind: "search",
+      query: searchQuery,
+      limitPerGroup,
+    });
+    if (result.kind !== "search") throw new Error("Unexpected search response");
     return context.json(
-      buildThreadSearchResponse(deps, {
-        ...searchThreadsWithPendingInteractionState(deps.db, {
-          query: searchQuery,
-          limitPerGroup,
-        }),
-      }) satisfies ThreadSearchResponse,
+      buildThreadSearchResponse(
+        deps,
+        result.results,
+      ) satisfies ThreadSearchResponse,
     );
   });
 

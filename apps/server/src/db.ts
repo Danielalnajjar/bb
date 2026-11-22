@@ -1,4 +1,5 @@
 import {
+  clearThreadConversationOutlines,
   createConnection,
   ensurePersonalProject,
   initializeLocalTurnRequestIndex,
@@ -59,6 +60,7 @@ export function initDb(
       );
     }
     migrate(db, { logger: options.logger });
+    clearThreadConversationOutlines(db);
     ensurePersonalProject(db);
     initializeLocalTurnRequestIndex(db, options.logger);
   } catch (error) {

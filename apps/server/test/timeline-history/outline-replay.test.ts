@@ -4,11 +4,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import type { Thread } from "@bb/domain";
-import {
-  advanceThreadPruning,
-  getLatestStoredConversationOutlineSequence,
-  getLatestThreadSequence,
-} from "@bb/db";
+import { advanceThreadPruning, getLatestThreadSequence } from "@bb/db";
 import {
   buildThreadConversationOutline,
   loadThreadConversationOutline,
@@ -113,9 +109,6 @@ function replayThread(sourcePath: string, sourceThreadId: string): string[] {
       const incremental = loadThreadConversationOutline(db, thread, {
         ...OPTIONS,
         maxSeq,
-        outlineSequence: getLatestStoredConversationOutlineSequence(db, {
-          threadId,
-        }),
       });
       const full = buildThreadConversationOutline(
         connections[1 - current],

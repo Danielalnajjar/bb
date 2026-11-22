@@ -825,26 +825,23 @@ describe("public thread data routes", () => {
         scope: threadScope(),
         data: { text: "Visible response" },
       });
-      const prepareSpy = vi.spyOn(harness.db.$client, "prepare");
-      const countFullOutlineQueries = () =>
-        prepareSpy.mock.calls.filter(([source]) => {
-          return (
-            typeof source === "string" &&
-            source.includes('"created_at"') &&
-            source.includes('"data"') &&
-            source.includes("union all")
-          );
-        }).length;
-
-      const firstResponse = await harness.app.request(
-        `/api/v1/threads/${thread.id}/conversation-outline`,
-      );
+      const serializeSpy = vi.spyOn(harness.db.$client, "serialize");
+      const [firstResponse, concurrentResponse] = await Promise.all([
+        harness.app.request(
+          `/api/v1/threads/${thread.id}/conversation-outline`,
+        ),
+        harness.app.request(
+          `/api/v1/threads/${thread.id}/conversation-outline`,
+        ),
+      ]);
       expect(firstResponse.status).toBe(200);
       const first = threadConversationOutlineResponseSchema.parse(
         await readJson(firstResponse),
       );
+      expect(concurrentResponse.status).toBe(200);
+      expect(await readJson(concurrentResponse)).toEqual(first);
       expect(first.maxSeq).toBe(1);
-      expect(countFullOutlineQueries()).toBe(1);
+      expect(serializeSpy.mock.calls.length).toBe(1);
 
       seedEvent(harness.deps, {
         threadId: thread.id,
@@ -875,7 +872,7 @@ describe("public thread data routes", () => {
         await readJson(cachedResponse),
       );
       expect(cached).toEqual({ items: first.items, maxSeq: 2 });
-      expect(countFullOutlineQueries()).toBe(1);
+      expect(serializeSpy.mock.calls.length).toBe(1);
 
       seedEvent(harness.deps, {
         threadId: thread.id,
@@ -898,7 +895,7 @@ describe("public thread data routes", () => {
         "Visible response",
         "New visible response",
       ]);
-      expect(countFullOutlineQueries()).toBe(2);
+      expect(serializeSpy.mock.calls.length).toBe(2);
       harness.db.transaction((tx) =>
         deleteThreadEventSuffixInTransaction(tx, {
           threadId: thread.id,
@@ -926,7 +923,7 @@ describe("public thread data routes", () => {
         "Visible response",
         "Replacement response",
       ]);
-      expect(countFullOutlineQueries()).toBe(3);
+      expect(serializeSpy.mock.calls.length).toBe(3);
     });
   });
 
@@ -956,7 +953,7 @@ describe("public thread data routes", () => {
         expect(outline.items.at(-1)?.preview).toBe(`Message ${sequence}`);
       }
 
-      const prepareSpy = vi.spyOn(harness.db.$client, "prepare");
+      const serializeSpy = vi.spyOn(harness.db.$client, "serialize");
       try {
         const response = await harness.app.request(stableUrl);
         expect(response.status).toBe(200);
@@ -965,12 +962,9 @@ describe("public thread data routes", () => {
             await readJson(response),
           ),
         ).toEqual({ items: [], maxSeq: 0 });
-        const storedOutlineReads = prepareSpy.mock.calls.filter(([source]) =>
-          source.startsWith('select "items_json", "projection_key"'),
-        );
-        expect(storedOutlineReads).toHaveLength(0);
+        expect(serializeSpy).not.toHaveBeenCalled();
       } finally {
-        prepareSpy.mockRestore();
+        serializeSpy.mockRestore();
       }
     });
   });

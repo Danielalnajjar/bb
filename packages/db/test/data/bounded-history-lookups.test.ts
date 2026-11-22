@@ -264,6 +264,7 @@ describe("history lookups bounded by existing indexes", () => {
     const includeNestedEvents = (classificationSequenceStart: number) =>
       getStoredConversationOutlineProjectionState(db, {
         classificationSequenceStart,
+        knownIncludeNestedEvents: false,
         sequenceStart: 0,
         summaryCompactionDeltaThreshold: 1_000,
         threadId: thread.id,

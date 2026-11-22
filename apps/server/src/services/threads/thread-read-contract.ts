@@ -1,0 +1,63 @@
+import type { ApiError } from "../../errors.js";
+import type {
+  ListThreadsOptions,
+  ThreadSearchResults,
+  ThreadWithPendingInteractionState,
+} from "@bb/db";
+import type { CompletedTurnDisplay } from "@bb/domain";
+
+export type ThreadReadTask =
+  | {
+      kind: "outline";
+      threadId: string;
+      providerCompletedTurnDisplay: CompletedTurnDisplay | null;
+      providerDisplayName: string | null;
+      eventRewriteGeneration: number;
+      serverDataVersion?: number;
+      role: "user" | "assistant" | null;
+    }
+  | {
+      kind: "message";
+      threadId: string;
+      providerCompletedTurnDisplay: CompletedTurnDisplay | null;
+      providerDisplayName: string | null;
+      eventRewriteGeneration: number;
+      serverDataVersion?: number;
+      seq: number;
+      before: number;
+      after: number;
+    }
+  | { kind: "list"; options: ListThreadsOptions }
+  | { kind: "search"; query: string; limitPerGroup: number };
+
+export interface ThreadReadRequest {
+  id: number;
+  source: string | Uint8Array;
+  task: ThreadReadTask;
+}
+
+export type ThreadReadResult =
+  | {
+      kind: "outline";
+      bytes: Uint8Array<ArrayBuffer>;
+      maxSeq: number;
+      projectionKey: string;
+    }
+  | {
+      kind: "message";
+      bytes: Uint8Array<ArrayBuffer>;
+    }
+  | {
+      kind: "list";
+      threads: ThreadWithPendingInteractionState[];
+    }
+  | { kind: "search"; results: ThreadSearchResults };
+
+export type ThreadReadResponse =
+  | { id: number; ok: true; result: ThreadReadResult }
+  | {
+      id: number;
+      ok: false;
+      message: string;
+      apiError?: { status: ApiError["status"]; body: ApiError["body"] };
+    };

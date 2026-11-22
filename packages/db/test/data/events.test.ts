@@ -31,7 +31,6 @@ import {
   getStoredProviderSession,
   resolveStoredProviderSessions,
   getLatestCompletedThreadContextClearSequence,
-  getLatestStoredConversationOutlineSequence,
   getLastStoredTurnRequestEvent,
   getLatestThreadSequence,
   insertEvents,
@@ -3130,11 +3129,6 @@ describe("events", () => {
     ).toBeNull();
     expect(
       getLatestCompletedThreadContextClearSequence(db, {
-        threadId: thread.id,
-      }),
-    ).toBe(completedSequence);
-    expect(
-      getLatestStoredConversationOutlineSequence(db, {
         threadId: thread.id,
       }),
     ).toBe(completedSequence);

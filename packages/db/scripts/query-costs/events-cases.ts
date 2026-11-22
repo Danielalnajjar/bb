@@ -23,6 +23,7 @@ import {
   appendStoredThreadEventInTransaction,
   appendStoredThreadEventsInTransaction,
   classifyStoredProviderThreadClaim,
+  clearThreadConversationOutlines,
   copyStoredThreadEventsInTransaction,
   deleteThreadEventSuffixInTransaction,
   findLastCompletedRootStoredTurn,
@@ -38,7 +39,6 @@ import {
   getLastStoredTurnRequestEvent,
   getLatestCompletedThreadContextClearSequence,
   getLatestModelFallbackRowSinceTurnRequest,
-  getLatestStoredConversationOutlineSequence,
   getLatestStoredRateLimitsEvent,
   getLatestStoredThreadEventOfTypes,
   getLatestThreadStopAim,
@@ -1144,13 +1144,6 @@ export const EVENTS_COST_CASES: readonly QueryCostCase[] = [
       }),
   },
   {
-    name: `${EVENTS}#getLatestStoredConversationOutlineSequence`,
-    run: (db, fixture) =>
-      getLatestStoredConversationOutlineSequence(db, {
-        threadId: fixture.threadId,
-      }),
-  },
-  {
     name: `${EVENTS}#getStoredConversationOutlineProjectionState`,
     growsWith: {
       history:
@@ -1159,6 +1152,7 @@ export const EVENTS_COST_CASES: readonly QueryCostCase[] = [
     run: (db, fixture) =>
       getStoredConversationOutlineProjectionState(db, {
         classificationSequenceStart: 0,
+        knownIncludeNestedEvents: false,
         sequenceStart: 0,
         summaryCompactionDeltaThreshold: 1_000,
         threadId: fixture.threadId,
@@ -1809,6 +1803,10 @@ export const EVENTS_COST_CASES: readonly QueryCostCase[] = [
         provisioningId: "provisioning-in-flight",
         threadId: fixture.threadId,
       }),
+  },
+  {
+    name: `${EVENTS}#clearThreadConversationOutlines`,
+    run: (db) => clearThreadConversationOutlines(db),
   },
   ...LIVE_TURN_COST_CASES,
 ];
