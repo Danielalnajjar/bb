@@ -267,16 +267,9 @@ async function executePreparedQueuedMessageDispatch(
         deps.db,
         wake.hostId,
       )) {
-        for (const row of listQueuedThreadMessagesWaitingOnKind(deps.db, {
-          kind: "host-offline",
-          threadId,
-        })) {
-          await attemptAutomaticQueuedMessage(deps, row, {
-            now: Date.now(),
-            respectRequeuePacing: false,
-            retryingFailure: false,
-          });
-        }
+        await offerHostOfflineQueuedMessages(deps, threadId, {
+          respectRequeuePacing: false,
+        });
       }
       return;
     case "app-update-released":
@@ -349,6 +342,34 @@ async function executePreparedQueuedMessageDispatch(
       await orphanedPluginWaitSweep(deps, wake.plugins).run(deps, Date.now());
       return;
   }
+}
+
+async function offerHostOfflineQueuedMessages(
+  deps: QueueDispatchDeps,
+  threadId: string,
+  args: { respectRequeuePacing: boolean },
+): Promise<void> {
+  for (const row of listQueuedThreadMessagesWaitingOnKind(deps.db, {
+    kind: "host-offline",
+    threadId,
+  })) {
+    await attemptAutomaticQueuedMessage(deps, row, {
+      now: Date.now(),
+      respectRequeuePacing: args.respectRequeuePacing,
+      retryingFailure: false,
+    });
+  }
+}
+
+function listThreadIdsParkedOnConnectedHosts(
+  deps: QueueDispatchDeps,
+): string[] {
+  return deps.hub
+    .listConnectedHostIds()
+    .filter((hostId) => !isMachineWaitingForExecution(deps, hostId))
+    .flatMap((hostId) =>
+      listThreadIdsWithHostOfflineQueueWaits(deps.db, hostId),
+    );
 }
 
 async function runThreadReadyDispatch(
@@ -628,6 +649,7 @@ export function failedQueueRetrySweep(
 }
 
 type IdleQueueRecoveryItem =
+  | { kind: "host-returned-thread"; threadId: string }
   | { kind: "idle-thread"; threadId: string }
   | { kind: "busy-thread-notice"; row: QueuedMessageDispatchRef };
 
@@ -636,6 +658,12 @@ export function idleThreadQueueSweep(deps: QueueDispatchDeps): ItemSweep {
     name: "queued-message-auto-send",
     concurrency: 1,
     list: () => [
+      ...listThreadIdsParkedOnConnectedHosts(deps).map(
+        (threadId): IdleQueueRecoveryItem => ({
+          kind: "host-returned-thread",
+          threadId,
+        }),
+      ),
       ...listIdleThreadsWithQueuedMessages(deps.db).map(
         (candidate): IdleQueueRecoveryItem => ({
           kind: "idle-thread",
@@ -646,18 +674,32 @@ export function idleThreadQueueSweep(deps: QueueDispatchDeps): ItemSweep {
         (row): IdleQueueRecoveryItem => ({ kind: "busy-thread-notice", row }),
       ),
     ],
-    key: (item) =>
-      item.kind === "idle-thread"
-        ? `thread:${item.threadId}`
-        : `notice:${item.row.id}`,
-    process: (item) =>
-      item.kind === "idle-thread"
-        ? runThreadReadyDispatch(deps, item.threadId)
-        : attemptAutomaticQueuedMessage(deps, item.row, {
+    key: (item) => {
+      switch (item.kind) {
+        case "host-returned-thread":
+          return `host-offline:${item.threadId}`;
+        case "idle-thread":
+          return `thread:${item.threadId}`;
+        case "busy-thread-notice":
+          return `notice:${item.row.id}`;
+      }
+    },
+    process: (item) => {
+      switch (item.kind) {
+        case "host-returned-thread":
+          return offerHostOfflineQueuedMessages(deps, item.threadId, {
+            respectRequeuePacing: true,
+          });
+        case "idle-thread":
+          return runThreadReadyDispatch(deps, item.threadId);
+        case "busy-thread-notice":
+          return attemptAutomaticQueuedMessage(deps, item.row, {
             now: Date.now(),
             respectRequeuePacing: true,
             retryingFailure: false,
-          }),
+          });
+      }
+    },
   });
 }
 
