@@ -34,6 +34,10 @@ export const acpLaunchSpecSchema = z
   .object({
     displayName: z.string().min(1),
     command: z.string().min(1),
+    commandEnv: z
+      .string()
+      .regex(/^[A-Z_][A-Z0-9_]*$/u)
+      .optional(),
     args: z.array(z.string()),
     env: z.record(z.string().min(1), z.string()),
     cwd: z.string().min(1).optional(),
@@ -56,10 +60,22 @@ export const acpLaunchSpecSchema = z
   .strict();
 export type AcpLaunchSpec = z.infer<typeof acpLaunchSpecSchema>;
 
+export function hostConfiguredAcpCommand(
+  spec: AcpLaunchSpec,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  if (spec.commandEnv === undefined) {
+    return null;
+  }
+  const configured = env[spec.commandEnv]?.trim();
+  return configured ? configured : null;
+}
+
 export function normalizeAcpLaunchSpec(spec: AcpLaunchSpec): AcpLaunchSpec {
   const {
     displayName,
     command,
+    commandEnv,
     args,
     env,
     cwd,
@@ -76,6 +92,7 @@ export function normalizeAcpLaunchSpec(spec: AcpLaunchSpec): AcpLaunchSpec {
   return {
     displayName,
     command,
+    ...(commandEnv !== undefined ? { commandEnv } : {}),
     args,
     env,
     ...(cwd !== undefined ? { cwd } : {}),

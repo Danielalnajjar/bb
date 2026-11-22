@@ -52,6 +52,7 @@ describe("Cursor ACP session MCP approvals", () => {
     await expect(
       approveCursorSessionMcpServer({
         agentCommand: "opencode",
+        cursorDialect: false,
         config: mcpConfig(),
         cwd: workspace,
         env: { CURSOR_DATA_DIR: cursorDataDir },
@@ -60,12 +61,34 @@ describe("Cursor ACP session MCP approvals", () => {
     expect(() => readFileSync(join(cursorDataDir, "projects"))).toThrow();
   });
 
+  it("approves for a Cursor-dialect agent whatever its executable is named", async () => {
+    const env = { CURSOR_DATA_DIR: makeTempDir("bb-cursor-data-") };
+    const installed = await approveCursorSessionMcpServer({
+      agentCommand: "/home/user/.local/bin/thread-vm-cursor",
+      cursorDialect: true,
+      config: mcpConfig(),
+      cwd: makeTempDir("bb-cursor-workspace-"),
+      env,
+    });
+    if (!installed) {
+      throw new Error("Cursor approval was not installed");
+    }
+    expect(JSON.parse(readFileSync(installed.path, "utf8")) as unknown).toEqual(
+      [installed.approval],
+    );
+    await revokeCursorSessionMcpServer(installed);
+    expect(JSON.parse(readFileSync(installed.path, "utf8")) as unknown).toEqual(
+      [],
+    );
+  });
+
   it("preserves unrelated approvals and removes its session approval on release", async () => {
     const cursorDataDir = makeTempDir("bb-cursor-data-");
     const workspace = makeTempDir("bb-cursor-workspace-");
     const env = { CURSOR_DATA_DIR: cursorDataDir };
     const first = await approveCursorSessionMcpServer({
       agentCommand: "/opt/cursor/cursor-agent",
+      cursorDialect: false,
       config: mcpConfig(),
       cwd: workspace,
       env,
@@ -79,12 +102,14 @@ describe("Cursor ACP session MCP approvals", () => {
     const approvals = await Promise.all([
       approveCursorSessionMcpServer({
         agentCommand: "cursor-agent",
+        cursorDialect: false,
         config: mcpConfig("thread-a"),
         cwd: workspace,
         env,
       }),
       approveCursorSessionMcpServer({
         agentCommand: "cursor-agent.exe",
+        cursorDialect: false,
         config: mcpConfig("thread-b"),
         cwd: workspace,
         env,
@@ -113,6 +138,7 @@ describe("Cursor ACP session MCP approvals", () => {
     const env = { CURSOR_DATA_DIR: cursorDataDir };
     const installed = await approveCursorSessionMcpServer({
       agentCommand: "cursor-agent",
+      cursorDialect: false,
       config: mcpConfig(),
       cwd: workspace,
       env,
@@ -125,6 +151,7 @@ describe("Cursor ACP session MCP approvals", () => {
 
     const existing = await approveCursorSessionMcpServer({
       agentCommand: "cursor-agent",
+      cursorDialect: false,
       config: mcpConfig(),
       cwd: workspace,
       env,

@@ -778,6 +778,16 @@ section or with `bb acp registry`, `bb acp add <agent-id>`, and
 `bb acp remove <agent-id>`. An added agent is a `customAgents` entry running
 the registry's `npx` or `uvx` package on the thread's host.
 
+The built-in Cursor provider (`acp-cursor`) runs `cursor-agent`. Set
+`BB_CURSOR_AGENT_EXECUTABLE` in a machine's host-daemon environment to run
+another executable there instead, for both model discovery
+(`<executable> --list-models`) and threads (`<executable> acp`); other machines
+keep `cursor-agent`. Use a full path, and restart bb on that machine after
+changing it. While it is set, the machine reports Cursor ready only when the
+executable exists and `<executable> --version` exits successfully; bb's Cursor
+install, sign-in, and usage readings, which target the official CLI, are off
+there.
+
 ## Custom Models
 
 Register extra picker models with top-level `customModels` in

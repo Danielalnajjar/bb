@@ -223,6 +223,7 @@ interface AgentLaunchArgs {
   dialectId?: string;
   parameterizedModelPicker?: boolean;
   agent?: { command: string; args: string[] };
+  commandEnv?: string;
   envVars?: Record<string, string>;
   modelListArgs?: string[];
   selectFlag?: string;
@@ -256,6 +257,7 @@ function acpLaunchSpec(args: AgentLaunchArgs): Record<string, unknown> {
   return {
     displayName: "Fake ACP",
     command: agent.command,
+    ...(args.commandEnv ? { commandEnv: args.commandEnv } : {}),
     args: agent.args,
     env: args.envVars ?? {},
     ...(args.modelListArgs
@@ -2881,6 +2883,209 @@ describe("acp bridge", () => {
     await stopThread(providerThreadId);
     expect(JSON.parse(readFileSync(approvalPath, "utf8")) as unknown).toEqual(
       [],
+    );
+  });
+
+  describe("host-configured executable", () => {
+    const COMMAND_ENV = "BB_TEST_ACP_EXECUTABLE";
+    const DECLARED_COMMAND = "bb-test-declared-acp-agent-not-installed";
+
+    function writeExecutable(name: string, body: string): string {
+      const path = join(workspaceDir, name);
+      writeFileSync(path, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+      return path;
+    }
+
+    function shellQuote(value: string): string {
+      return `'${value.replaceAll("'", "'\\''")}'`;
+    }
+
+    function loggingNodeLauncher(): { path: string; log: string } {
+      const log = join(workspaceDir, "launches.log");
+      const path = writeExecutable(
+        "configured-acp-agent",
+        `printf '%s\\n' "$*" >> ${shellQuote(log)}\nexec ${shellQuote(process.execPath)} "$@"`,
+      );
+      return { path, log };
+    }
+
+    function launches(log: string): string[] {
+      return existsSync(log)
+        ? readFileSync(log, "utf8").trim().split("\n")
+        : [];
+    }
+
+    function cursorLaunchSpec(): Record<string, unknown> {
+      return {
+        displayName: "Cursor",
+        command: DECLARED_COMMAND,
+        commandEnv: COMMAND_ENV,
+        args: ["acp"],
+        env: {},
+      };
+    }
+
+    async function providerHealth(): Promise<Record<string, unknown>> {
+      const id = sendRequest("provider/health", {
+        providerId: "acp-test",
+        providerOptions: {
+          acpDialect: "cursor",
+          acpLaunchSpec: cursorLaunchSpec(),
+        },
+      });
+      const response = await waitForResponse(id);
+      expect(response.error).toBeUndefined();
+      return (response.result as { health: Record<string, unknown> }).health;
+    }
+
+    it.skipIf(process.platform === "win32")(
+      "discovers models and launches ACP through the configured executable",
+      async () => {
+        const launcher = loggingNodeLauncher();
+        vi.stubEnv(COMMAND_ENV, `  ${launcher.path}  `);
+        const agent = { command: DECLARED_COMMAND, args: [FAKE_AGENT_PATH] };
+
+        const modelListId = sendModelList({
+          agent,
+          commandEnv: COMMAND_ENV,
+          modelLines: "cli-model - CLI Model",
+        });
+        expect((await waitForResponse(modelListId)).result).toMatchObject({
+          models: [{ id: "cli-model", displayName: "CLI Model" }],
+        });
+        expect(launches(launcher.log)).toEqual([
+          `${FAKE_AGENT_PATH} --list-models`,
+          FAKE_AGENT_PATH,
+        ]);
+
+        const { providerThreadId } = await startThread({
+          agent,
+          commandEnv: COMMAND_ENV,
+        });
+        expect(providerThreadId).toMatch(/^fake-sess-\d+$/);
+        expect(launches(launcher.log).at(-1)).toBe(FAKE_AGENT_PATH);
+      },
+    );
+
+    it.each([undefined, "", "   "])(
+      "launches the declared command when the configured executable is %j",
+      async (configured) => {
+        if (configured !== undefined) {
+          vi.stubEnv(COMMAND_ENV, configured);
+        }
+        const { providerThreadId } = await startThread({
+          commandEnv: COMMAND_ENV,
+        });
+        expect(providerThreadId).toMatch(/^fake-sess-\d+$/);
+      },
+    );
+
+    it("reports the declared Cursor CLI missing, with its installer, when nothing is configured", async () => {
+      expect(await providerHealth()).toMatchObject({
+        status: "not_installed",
+        canInstall: true,
+        loginCommand: "cursor-agent login",
+      });
+    });
+
+    it("is not ready when the configured executable is missing", async () => {
+      vi.stubEnv(COMMAND_ENV, join(workspaceDir, "missing-launcher"));
+      expect(await providerHealth()).toMatchObject({
+        status: "not_installed",
+        canInstall: false,
+        canUpdate: false,
+        loginCommand: null,
+      });
+    });
+
+    it.skipIf(process.platform === "win32")(
+      "is not ready when the configured executable cannot run",
+      async () => {
+        const launcher = writeExecutable(
+          "unavailable-launcher",
+          "echo 'managed runtime unavailable' >&2\nexit 1",
+        );
+        vi.stubEnv(COMMAND_ENV, launcher);
+        const health = await providerHealth();
+        expect(health).toMatchObject({
+          status: "unknown",
+          canInstall: false,
+          loginCommand: null,
+        });
+        expect(health.statusMessage).toContain(
+          `The configured executable ${launcher} did not run`,
+        );
+      },
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "is ready when the configured executable runs, without reading a Cursor sign-in",
+      async () => {
+        const launcher = writeExecutable(
+          "managed-launcher",
+          'test "$1" = --version && echo 2026.11.19-abc1234',
+        );
+        vi.stubEnv(COMMAND_ENV, launcher);
+        vi.stubEnv("HOME", workspaceDir);
+        vi.stubEnv("XDG_CONFIG_HOME", join(workspaceDir, "config"));
+        expect(await providerHealth()).toMatchObject({
+          status: "ready",
+          installedVersion: "2026.11.19-abc1234",
+          accountEmail: null,
+          canInstall: false,
+          loginCommand: null,
+        });
+
+        writeFileSync(launcher, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+        expect(await providerHealth()).toMatchObject({ status: "unknown" });
+        rmSync(launcher);
+        expect(await providerHealth()).toMatchObject({
+          status: "not_installed",
+        });
+      },
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "approves Cursor session MCP servers through a differently named executable",
+      async () => {
+        const launcher = loggingNodeLauncher();
+        vi.stubEnv(COMMAND_ENV, launcher.path);
+        const cursorDataDir = join(workspaceDir, "cursor-data");
+        const { providerThreadId } = await startThread({
+          agent: { command: DECLARED_COMMAND, args: [FAKE_AGENT_PATH] },
+          commandEnv: COMMAND_ENV,
+          dialectId: "cursor",
+          envVars: { CURSOR_DATA_DIR: cursorDataDir },
+          dynamicTools: [
+            {
+              name: "update_environment_directory",
+              description: "Move this thread to another environment directory.",
+              inputSchema: { type: "object", properties: {} },
+            },
+          ],
+        });
+        expect(launches(launcher.log)).toEqual([FAKE_AGENT_PATH]);
+        const projectSlug = workspaceDir
+          .replace(/[^a-zA-Z0-9]/gu, "-")
+          .replace(/-+/gu, "-")
+          .replace(/^-+|-+$/gu, "");
+        const approvalPath = join(
+          cursorDataDir,
+          "projects",
+          projectSlug,
+          "mcp-approvals.json",
+        );
+        expect(
+          JSON.parse(readFileSync(approvalPath, "utf8")) as unknown,
+        ).toEqual([
+          expect.stringMatching(`^${ACP_BRIDGE_MCP_SERVER_NAME}-[a-f0-9]{16}$`),
+        ]);
+
+        await stopThread(providerThreadId);
+        expect(
+          JSON.parse(readFileSync(approvalPath, "utf8")) as unknown,
+        ).toEqual([]);
+      },
     );
   });
 

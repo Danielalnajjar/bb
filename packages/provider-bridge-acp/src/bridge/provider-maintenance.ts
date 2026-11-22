@@ -159,10 +159,12 @@ function healthResult(args: {
   };
 }
 
-async function readAcpCliVersion(
+async function runAcpCliVersion(
   command: string,
   env: NodeJS.ProcessEnv,
-): Promise<string | null> {
+): Promise<
+  { ran: true; version: string | null } | { ran: false; error: string }
+> {
   try {
     const { stdout, stderr } = await execPortableFile(command, ["--version"], {
       cwd: process.cwd(),
@@ -171,22 +173,36 @@ async function readAcpCliVersion(
       timeout: 5_000,
     });
     const output = `${stdout}\n${stderr}`;
-    return (
-      versionFrom(output) ??
-      output.match(
-        /(?:^|\s)(\d{4}\.(?:0[1-9]|1[0-2])\.(?:0[1-9]|[12]\d|3[01])-[0-9a-f]+)(?=\s|$)/u,
-      )?.[1] ??
-      null
-    );
-  } catch {
-    return null;
+    return {
+      ran: true,
+      version:
+        versionFrom(output) ??
+        output.match(
+          /(?:^|\s)(\d{4}\.(?:0[1-9]|1[0-2])\.(?:0[1-9]|[12]\d|3[01])-[0-9a-f]+)(?=\s|$)/u,
+        )?.[1] ??
+        null,
+    };
+  } catch (error) {
+    return {
+      ran: false,
+      error: error instanceof Error ? error.message.trim() : String(error),
+    };
   }
+}
+
+async function readAcpCliVersion(
+  command: string,
+  env: NodeJS.ProcessEnv,
+): Promise<string | null> {
+  const run = await runAcpCliVersion(command, env);
+  return run.ran ? run.version : null;
 }
 
 export async function getAcpProviderHealth(args: {
   maintenance: AcpMaintenanceDialect | undefined;
   command: string | null;
   env: NodeJS.ProcessEnv;
+  executableConfigured: boolean;
 }): Promise<ProviderHealthResult> {
   const maintenance = args.maintenance;
   if (args.command === null) {
@@ -198,6 +214,20 @@ export async function getAcpProviderHealth(args: {
   }
   if ((await resolveExecutablePath(args.command, args.env)) === null) {
     return healthResult({ maintenance, status: "not_installed" });
+  }
+  if (args.executableConfigured) {
+    const run = await runAcpCliVersion(args.command, args.env);
+    return run.ran
+      ? healthResult({
+          maintenance,
+          status: "ready",
+          installedVersion: run.version,
+        })
+      : healthResult({
+          maintenance,
+          status: "unknown",
+          statusMessage: `The configured executable ${args.command} did not run: ${run.error}`,
+        });
   }
   const version = await readAcpCliVersion(args.command, args.env);
   if (maintenance === undefined) {

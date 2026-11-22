@@ -1249,7 +1249,10 @@ the agent named by `providerOptions.acpLaunchSpec` with the dialect named by
 agent for its `agentCapabilities`, and `experimental_acpAgentProbeSchema`
 validates the answer across a host RPC boundary.
 `experimental_acpLaunchSpecSchema` / `AcpLaunchSpec` is the launch spec the
-bridge parses.
+bridge parses. Its optional `commandEnv` names a host environment variable
+that, when set to a non-blank value, replaces `command` on that host for every
+launch, model listing and readiness check; the declaration lists the same name
+in `env.passthrough` so the daemon forwards it.
 
 `experimental_registerAcpDialect` adds a dialect. A plugin calls it at module
 load in its `bb.host` artifact with an `AcpDialect` and names the id as
