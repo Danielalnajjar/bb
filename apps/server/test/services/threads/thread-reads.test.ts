@@ -2,21 +2,31 @@ import { describe, expect, it, onTestFinished } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { defaultAppSettings, threadScope } from "@bb/domain";
 import {
+  defaultAppSettings,
+  encodeClientTurnRequestIdNumber,
+  threadScope,
+  turnScope,
+} from "@bb/domain";
+import {
+  archiveThread,
   createConnection,
   createProject,
   createThread,
   deleteThreadEventSuffixInTransaction,
   getThreadEventRewriteGeneration,
   insertEvents,
+  listThreadsWithPendingInteractionState,
   noopNotifier,
   searchThreadsWithPendingInteractionState,
   setAppSettings,
   upsertHost,
 } from "@bb/db";
 import { createMigratedConnection } from "@bb/db/testing";
-import { loadThreadConversationOutline } from "../../../src/services/threads/timeline.js";
+import {
+  getThreadMessage,
+  loadThreadConversationOutline,
+} from "../../../src/services/threads/timeline.js";
 import {
   closeThreadReader,
   readThreadData,
@@ -159,16 +169,196 @@ describe("thread read isolation", () => {
       limitPerGroup: 20,
     });
     await expect(search).resolves.toMatchObject({ kind: "search" });
-    const pending = readThreadData(db, {
+  });
+
+  it("returns message bytes with context, 404 ApiError, and same-head rewrite invalidation", async () => {
+    const { db, thread } = setup();
+    const requestEvent = (
+      sequence: number,
+      requestId: number,
+      text: string,
+    ) => ({
+      threadId: thread.id,
+      sequence,
+      type: "client/turn/requested" as const,
+      scope: threadScope(),
+      itemId: null,
+      itemKind: null,
+      parentToolCallId: null,
+      data: JSON.stringify({
+        direction: "outbound",
+        requestId: encodeClientTurnRequestIdNumber({ value: requestId }),
+        input: [{ type: "text", text, mentions: [] }],
+        target: { kind: "new-turn" },
+        execution: {
+          model: "gpt-4o-mini",
+          reasoningLevel: "medium",
+          permissionMode: "full",
+          serviceTier: "fast",
+          source: "client/turn/requested",
+        },
+        initiator: "user",
+        senderThreadId: null,
+        request: { method: "turn/start", params: {} },
+        source: "tell",
+      }),
+    });
+    const replyEvent = (
+      sequence: number,
+      requestId: number,
+      itemId: string,
+      text: string,
+    ) => [
+      {
+        threadId: thread.id,
+        sequence: sequence - 2,
+        providerThreadId: "provider-thread-1",
+        type: "turn/started" as const,
+        scope: turnScope(`turn-${requestId}`),
+        itemId: null,
+        itemKind: null,
+        parentToolCallId: null,
+        data: JSON.stringify({}),
+      },
+      {
+        threadId: thread.id,
+        sequence: sequence - 1,
+        providerThreadId: "provider-thread-1",
+        type: "turn/input/accepted" as const,
+        scope: turnScope(`turn-${requestId}`),
+        itemId: null,
+        itemKind: null,
+        parentToolCallId: null,
+        data: JSON.stringify({
+          clientRequestId: encodeClientTurnRequestIdNumber({
+            value: requestId,
+          }),
+        }),
+      },
+      {
+        threadId: thread.id,
+        sequence,
+        providerThreadId: "provider-thread-1",
+        type: "item/completed" as const,
+        scope: turnScope(`turn-${requestId}`),
+        itemId,
+        itemKind: "agentMessage" as const,
+        parentToolCallId: null,
+        data: JSON.stringify({
+          item: { type: "agentMessage", id: itemId, text },
+        }),
+      },
+    ];
+    insertEvents(db, noopNotifier, [
+      requestEvent(1, 101, "prompt one"),
+      ...replyEvent(4, 101, "a-1", "reply one 😀"),
+      requestEvent(5, 102, "prompt two"),
+      ...replyEvent(8, 102, "a-2", "reply two"),
+    ]);
+
+    const readMsg = (seq: number, before = 0, after = 0) =>
+      readThreadData(db, {
+        kind: "message",
+        threadId: thread.id,
+        providerCompletedTurnDisplay: "collapse",
+        providerDisplayName: null,
+        eventRewriteGeneration: getThreadEventRewriteGeneration(thread.id),
+        seq,
+        before,
+        after,
+      });
+
+    const result = await readMsg(4, 1, 1);
+    expect(result.kind).toBe("message");
+    if (result.kind !== "message") throw new Error("Expected message");
+    const expected = getThreadMessage(db, thread, {
+      completedTurnDisplay: "collapse",
+      includeClearedContextHistory: false,
+      maxSeq: 8,
+      seq: 4,
+      before: 1,
+      after: 1,
+    });
+    expect(JSON.parse(new TextDecoder().decode(result.bytes))).toEqual(
+      expected,
+    );
+
+    await expect(readMsg(99)).rejects.toMatchObject({
+      status: 404,
+      body: { code: "message_not_found" },
+    });
+
+    db.transaction((tx) =>
+      deleteThreadEventSuffixInTransaction(tx, {
+        threadId: thread.id,
+        cutoffSequence: 8,
+        oldMaxSequence: 8,
+      }),
+    );
+    insertEvents(db, noopNotifier, [
+      {
+        threadId: thread.id,
+        sequence: 8,
+        providerThreadId: "provider-thread-1",
+        type: "item/completed",
+        scope: turnScope("turn-102"),
+        itemId: "a-2",
+        itemKind: "agentMessage",
+        parentToolCallId: null,
+        data: JSON.stringify({
+          item: { type: "agentMessage", id: "a-2", text: "reply replaced" },
+        }),
+      },
+    ]);
+    const replaced = await readMsg(8);
+    if (replaced.kind !== "message") throw new Error("Expected message");
+    const decoded = new TextDecoder().decode(replaced.bytes);
+    expect(decoded).toContain("reply replaced");
+    expect(decoded).not.toContain("reply two");
+  });
+
+  it("offloads archived thread lists to the list lane and closes both lanes", async () => {
+    const { db, thread } = setup();
+    const archivedThread = createThread(db, noopNotifier, {
+      projectId: thread.projectId,
+      providerId: "codex",
+      title: "Archived alpha",
+      status: "idle",
+    });
+    archiveThread(db, noopNotifier, archivedThread.id);
+
+    for (const options of [
+      { includeHidden: true },
+      { archived: true, includeHidden: false },
+    ]) {
+      const expected = listThreadsWithPendingInteractionState(db, options);
+      const result = await readThreadData(db, { kind: "list", options });
+      expect(result).toEqual({ kind: "list", threads: expected });
+    }
+
+    const pendingHeavy = readThreadData(db, {
       kind: "search",
       query: "alpha",
       limitPerGroup: 20,
     });
-    const rejected = expect(pending).rejects.toThrow("Thread reader closed");
+    const pendingList = readThreadData(db, {
+      kind: "list",
+      options: { archived: true },
+    });
+    const rejectedHeavy = expect(pendingHeavy).rejects.toThrow(
+      "Thread reader closed",
+    );
+    const rejectedList = expect(pendingList).rejects.toThrow(
+      "Thread reader closed",
+    );
     await closeThreadReader(db);
-    await rejected;
+    await rejectedHeavy;
+    await rejectedList;
     await expect(
       readThreadData(db, { kind: "search", query: "alpha", limitPerGroup: 20 }),
+    ).rejects.toThrow("Thread reader closed");
+    await expect(
+      readThreadData(db, { kind: "list", options: { archived: true } }),
     ).rejects.toThrow("Thread reader closed");
   });
 });

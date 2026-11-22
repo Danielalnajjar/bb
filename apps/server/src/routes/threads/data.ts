@@ -43,7 +43,6 @@ import {
 } from "../../services/threads/thread-head-state.js";
 import {
   buildThreadConversationOutlineProjectionKey,
-  getThreadMessage,
   buildTimelineTurnSummaryDetails,
   THREAD_TIMELINE_DEFAULT_SEGMENT_LIMIT,
   THREAD_TIMELINE_SEGMENT_LIMIT_MAX,
@@ -181,6 +180,14 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     string,
     ReturnType<typeof readThreadData>
   >();
+  const pendingThreadMessages = new Map<
+    string,
+    ReturnType<typeof readThreadData>
+  >();
+  const readConversationVersion = (threadId: string) => ({
+    dataVersion: getDatabaseDataVersion(deps.db),
+    eventRewriteGeneration: getThreadEventRewriteGeneration(threadId),
+  });
   const resolveConversationRowsOptions = (thread: Thread) => {
     const providerDisplayName = resolveThreadProviderDisplayName(
       deps,
@@ -383,7 +390,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     });
   });
 
-  get(routes.message, (context, query) => {
+  get(routes.message, async (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     const seq = context.req.param("seq");
     if (!/^\d+$/.test(seq)) {
@@ -393,14 +400,62 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
         "Message seq must be a non-negative integer",
       );
     }
-    return context.json(
-      getThreadMessage(deps.db, thread, {
-        ...resolveConversationRowsOptions(thread),
-        seq: parseInteger(seq, "seq"),
-        before: parseOptionalInteger(query.before, "before") ?? 0,
-        after: parseOptionalInteger(query.after, "after") ?? 0,
-      }),
-    );
+    const messageSeq = parseInteger(seq, "seq");
+    const before = parseOptionalInteger(query.before, "before") ?? 0;
+    const after = parseOptionalInteger(query.after, "after") ?? 0;
+    const maxSeq = getLatestThreadSequence(deps.db, { threadId: thread.id });
+    const providerCompletedTurnDisplay =
+      deps.providerRegistry.get(thread.providerId)?.info.completedTurnDisplay ??
+      null;
+    const providerDisplayName =
+      resolveThreadProviderDisplayName(deps, thread.providerId) ?? null;
+    const version = readConversationVersion(thread.id);
+    const task = {
+      kind: "message" as const,
+      threadId: thread.id,
+      providerCompletedTurnDisplay,
+      providerDisplayName,
+      eventRewriteGeneration: version.eventRewriteGeneration,
+      seq: messageSeq,
+      before,
+      after,
+    };
+    const pendingKey = JSON.stringify([
+      thread.id,
+      messageSeq,
+      before,
+      after,
+      version.dataVersion,
+      version.eventRewriteGeneration,
+      maxSeq,
+      providerCompletedTurnDisplay,
+      providerDisplayName,
+    ]);
+    let pending = pendingThreadMessages.get(pendingKey);
+    if (pending === undefined) {
+      pending = readThreadData(deps.db, {
+        ...task,
+        serverDataVersion: version.dataVersion,
+      }).finally(() => pendingThreadMessages.delete(pendingKey));
+      pendingThreadMessages.set(pendingKey, pending);
+    }
+    let result = await pending;
+    const currentVersion = readConversationVersion(thread.id);
+    if (
+      currentVersion.dataVersion !== version.dataVersion ||
+      currentVersion.eventRewriteGeneration !== version.eventRewriteGeneration
+    ) {
+      result = await readThreadData(deps.db, {
+        ...task,
+        eventRewriteGeneration: currentVersion.eventRewriteGeneration,
+      });
+    }
+    if (result.kind !== "message") {
+      throw new Error("Unexpected message response");
+    }
+    return context.body(result.bytes, 200, {
+      "Content-Type": "application/json",
+    });
   });
 
   get(routes.timelineTurnSummaryDetails, (context, query) => {

@@ -18,6 +18,7 @@ import {
   listThreadAncestors,
   listThreadDescendants,
   updateThread,
+  type ListThreadsOptions,
   type ThreadSearchResultGroup as DbThreadSearchResultGroup,
   type UpdateThreadInput,
 } from "@bb/db";
@@ -304,7 +305,7 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
     );
   });
 
-  get(routes.list, (context, query) => {
+  get(routes.list, async (context, query) => {
     const { limit, offset } = parsePaginationQuery({
       limit: query.limit,
       offset: query.offset,
@@ -322,7 +323,7 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
     if (query.sectionId) {
       requireThreadSection(deps, query.sectionId);
     }
-    const threads = listThreadsWithPendingInteractionState(deps.db, {
+    const listOptions: ListThreadsOptions = {
       ...(query.projectId ? { projectId: query.projectId } : {}),
       ...(query.environmentId ? { environmentId: query.environmentId } : {}),
       ...(query.hostId ? { hostId: query.hostId } : {}),
@@ -342,7 +343,18 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
         query.hasParent === undefined ? undefined : query.hasParent === "true",
       ...(limit !== undefined ? { limit } : {}),
       ...(offset !== undefined ? { offset } : {}),
-    });
+    };
+    let threads;
+    if (listOptions.archived !== false && listOptions.threadIds === undefined) {
+      const result = await readThreadData(deps.db, {
+        kind: "list",
+        options: listOptions,
+      });
+      if (result.kind !== "list") throw new Error("Unexpected list response");
+      threads = result.threads;
+    } else {
+      threads = listThreadsWithPendingInteractionState(deps.db, listOptions);
+    }
     return context.json(
       toThreadListEntryResponses(deps, { threads }) satisfies ThreadListEntry[],
     );

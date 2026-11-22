@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { isRawThreadId } from "@bb/domain";
+import { isRawThreadId, turnScope } from "@bb/domain";
 import { createConnection } from "../../src/connection.js";
+import { insertEvents } from "../../src/data/events.js";
 import { noopNotifier } from "../../src/notifier.js";
 import type { DbNotifier } from "../../src/notifier.js";
 import { threads } from "../../src/schema.js";
@@ -20,6 +21,7 @@ import {
   listThreadEnvironmentAssignmentsOnHost,
   listThreadsWithPendingInteractionStateForProjects,
   listThreadsWithPendingInteractionState,
+  listTurnStartDeadlineCandidates,
   updateThread,
   deleteThread,
   archiveThread,
@@ -1541,5 +1543,72 @@ describe("thread originKind", () => {
     });
 
     expect(own.map((thread) => thread.id)).toEqual([ownFork.id]);
+  });
+});
+
+describe("listTurnStartDeadlineCandidates", () => {
+  it("inspects only the latest turn/completed event by sequence", () => {
+    const { db, host, project } = setup();
+    try {
+      const environment = createEnvironment(db, noopNotifier, {
+        projectId: project.id,
+        hostId: host.id,
+        path: "/tmp/deadline-test",
+        status: "ready",
+        providerOwnsPath: false,
+      });
+      const makeActive = (title: string) => {
+        const created = createThread(db, noopNotifier, {
+          projectId: project.id,
+          environmentId: environment.id,
+          providerId: "codex",
+          title,
+        });
+        db.update(threads)
+          .set({ status: "active", statusChangedAt: 1_000 })
+          .where(eq(threads.id, created.id))
+          .run();
+        return created.id;
+      };
+      const addCompletion = (
+        threadId: string,
+        sequence: number,
+        createdAt: number,
+      ) =>
+        insertEvents(db, noopNotifier, [
+          {
+            threadId,
+            sequence,
+            type: "turn/completed",
+            scope: turnScope(`turn-${sequence}`),
+            itemId: null,
+            itemKind: null,
+            parentToolCallId: null,
+            data: JSON.stringify({}),
+            createdAt,
+          },
+        ]);
+
+      const noCompletionId = makeActive("no-completion");
+      const staleCompletionId = makeActive("stale-completion");
+      addCompletion(staleCompletionId, 1, 900);
+
+      const recentCompletionId = makeActive("recent-completion");
+      addCompletion(recentCompletionId, 1, 900);
+      addCompletion(recentCompletionId, 2, 1_500);
+
+      const outOfOrderId = makeActive("out-of-order");
+      addCompletion(outOfOrderId, 1, 2_000);
+      addCompletion(outOfOrderId, 2, 900);
+
+      const candidates = listTurnStartDeadlineCandidates(db, {
+        deadline: 1_000,
+      });
+      expect(candidates.map((row) => row.threadId).sort()).toEqual(
+        [noCompletionId, staleCompletionId, outOfOrderId].sort(),
+      );
+    } finally {
+      db.$client.close();
+    }
   });
 });
