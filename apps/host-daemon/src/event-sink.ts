@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ThreadEvent } from "@bb/domain";
 import { TEXT_DELTA_FLUSH_MS } from "@bb/provider-bridge-protocol/assembler";
 import type {
@@ -395,7 +396,11 @@ export function createEventSink(options: CreateEventSinkOptions): EventSink {
       }
       const immediate = shouldFlushThreadEventImmediately(input.event);
       queue.push({
-        envelope: { threadId: input.threadId, event: input.event },
+        envelope: {
+          threadId: input.threadId,
+          event: input.event,
+          eventId: randomUUID(),
+        },
         immediate,
         queuedAt: now(),
       });

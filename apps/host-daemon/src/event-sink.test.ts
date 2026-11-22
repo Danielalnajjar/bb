@@ -1,5 +1,5 @@
-import { threadScope, turnScope } from "@bb/domain";
-import { createDeferredPromise } from "@bb/test-helpers";
+import { threadScope, turnScope, type ThreadEvent } from "@bb/domain";
+import { createDeferredPromise, type DeferredPromise } from "@bb/test-helpers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createEventSink,
@@ -48,6 +48,13 @@ function systemErrorEvent(threadId: string) {
   } as const;
 }
 
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+
+function queuedEnvelope(threadId: string, event: ThreadEvent) {
+  return { threadId, event, eventId: expect.stringMatching(UUID_PATTERN) };
+}
+
 describe("event sink", () => {
   it("drains successfully skipped diffs without requiring allocated sequences", async () => {
     const postEvents = vi.fn<CreateEventSinkOptions["postEvents"]>(
@@ -78,7 +85,7 @@ describe("event sink", () => {
     await sink.flush();
     expect(postEvents).toHaveBeenCalledTimes(2);
     expect(postEvents).toHaveBeenLastCalledWith([
-      { threadId: "thr_1", event: systemErrorEvent("thr_1") },
+      queuedEnvelope("thr_1", systemErrorEvent("thr_1")),
     ]);
   });
 
@@ -103,9 +110,9 @@ describe("event sink", () => {
 
     expect(postEvents).toHaveBeenCalledTimes(1);
     expect(postEvents).toHaveBeenCalledWith([
-      { threadId: "thr_1", event: systemErrorEvent("thr_1") },
-      { threadId: "thr_2", event: systemErrorEvent("thr_2") },
-      { threadId: "thr_1", event: systemErrorEvent("thr_1") },
+      queuedEnvelope("thr_1", systemErrorEvent("thr_1")),
+      queuedEnvelope("thr_2", systemErrorEvent("thr_2")),
+      queuedEnvelope("thr_1", systemErrorEvent("thr_1")),
     ]);
     expect(sink.listUndeliveredThreadIds()).toEqual([]);
   });
@@ -135,7 +142,7 @@ describe("event sink", () => {
 
     expect(postEvents).toHaveBeenCalledTimes(2);
     expect(postEvents).toHaveBeenLastCalledWith([
-      { threadId: "thr_1", event: systemErrorEvent("thr_1") },
+      queuedEnvelope("thr_1", systemErrorEvent("thr_1")),
     ]);
   });
 
@@ -333,7 +340,7 @@ describe("event sink", () => {
 
     expect(postEvents).toHaveBeenCalledTimes(2);
     expect(postEvents).toHaveBeenLastCalledWith([
-      { threadId: "thr_1", event: systemErrorEvent("thr_1") },
+      queuedEnvelope("thr_1", systemErrorEvent("thr_1")),
     ]);
   });
 
@@ -372,8 +379,8 @@ describe("event sink", () => {
 
     await sink.flush();
     expect(postEvents).toHaveBeenLastCalledWith([
-      { threadId: "thr_1", event: systemErrorEvent("thr_1") },
-      { threadId: "thr_2", event: systemErrorEvent("thr_2") },
+      queuedEnvelope("thr_1", systemErrorEvent("thr_1")),
+      queuedEnvelope("thr_2", systemErrorEvent("thr_2")),
     ]);
   });
 
@@ -396,11 +403,13 @@ describe("event sink automatic retries", () => {
   let postEvents: ReturnType<typeof acceptingPostEvents>;
   let sink: EventSink;
   let sessionOpen: boolean;
+  let heldRequests: DeferredPromise<EventPostResult>[];
 
   beforeEach(() => {
     vi.useFakeTimers();
     vi.spyOn(Math, "random").mockReturnValue(0.5);
     sessionOpen = true;
+    heldRequests = [];
     postEvents = acceptingPostEvents();
     sink = createEventSink({
       isSessionOpen: () => sessionOpen,
@@ -410,14 +419,22 @@ describe("event sink automatic retries", () => {
     sink.emit({ threadId: "thr_1", event: systemErrorEvent("thr_1") });
   });
 
-  afterEach(() => {
-    vi.clearAllTimers();
-    vi.useRealTimers();
-    vi.restoreAllMocks();
+  afterEach(async () => {
+    try {
+      for (const request of heldRequests) {
+        request.resolve({ acceptedEvents: [], rejectedEvents: [] });
+      }
+      await sink.dispose();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
   });
 
   it("delivers a completion queued during a failed upload without new activity", async () => {
     const request = createDeferredPromise<EventPostResult>();
+    heldRequests.push(request);
     postEvents.mockImplementationOnce(() => request.promise);
     const flush = sink.flush();
     const completion = {
@@ -433,11 +450,20 @@ describe("event sink automatic retries", () => {
 
     await vi.advanceTimersByTimeAsync(1000);
     expect(postEvents).toHaveBeenLastCalledWith([
-      { threadId: "thr_1", event: systemErrorEvent("thr_1") },
-      { threadId: "thr_1", event: completion },
+      queuedEnvelope("thr_1", systemErrorEvent("thr_1")),
+      queuedEnvelope("thr_1", completion),
     ]);
     expect(postEvents).toHaveBeenCalledTimes(2);
     expect(vi.getTimerCount()).toBe(0);
+    const [firstAttempt, retry] = postEvents.mock.calls.map(([events]) =>
+      events.map((envelope) => envelope.eventId),
+    );
+    expect(firstAttempt).toEqual([expect.stringMatching(UUID_PATTERN)]);
+    expect(retry).toEqual([
+      firstAttempt?.[0],
+      expect.stringMatching(UUID_PATTERN),
+    ]);
+    expect(retry?.[1]).not.toBe(firstAttempt?.[0]);
   });
 
   it("backs off repeated failures up to a capped interval despite urgent arrivals", async () => {
@@ -491,6 +517,7 @@ describe("event sink automatic retries", () => {
 
   it("posts another thread beside an in-flight retry without reposting it", async () => {
     const request = createDeferredPromise<EventPostResult>();
+    heldRequests.push(request);
     postEvents
       .mockRejectedValueOnce(new Error("offline"))
       .mockImplementationOnce(() => request.promise);
@@ -502,7 +529,7 @@ describe("event sink automatic retries", () => {
     await vi.advanceTimersByTimeAsync(60000);
     expect(postEvents).toHaveBeenCalledTimes(3);
     expect(postEvents).toHaveBeenLastCalledWith([
-      { threadId: "thr_2", event: systemErrorEvent("thr_2") },
+      queuedEnvelope("thr_2", systemErrorEvent("thr_2")),
     ]);
     request.resolve({ acceptedEvents: [], rejectedEvents: [] });
     await flush;

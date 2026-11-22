@@ -1,23 +1,31 @@
 import { performance } from "node:perf_hooks";
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import {
   appendDaemonEventsInTransaction,
   deriveStoredEventItemFields,
   findLastCompletedRootStoredTurn,
+  findLastRootStoredTurnStarted,
   findLatestUnresolvedClientTurnRequestIdAfterSequence,
+  findStoredEventReceipt,
   getLatestStoredThreadProvisioningStatus,
   getThread,
   getLatestThreadSequence,
   hasRootStoredTurnStarted,
+  hasRootTurnSupersessionAfter,
+  isEventLifecycleApplied,
   isTurnAimedAtByEarlierStop,
   listStoredTurnCompletedKeys,
   listThreadEnvironmentAssignmentsOnHost,
+  markEventLifecycleApplied,
   MissingStoredTurnStartedError,
 } from "@bb/db";
 import type {
   AcceptedDaemonEvent,
   AppendDaemonEventInput,
   AppendDaemonEventsResult,
+  DbQueryConnection,
+  StoredEventReceipt,
 } from "@bb/db";
 import {
   hostDaemonEventBatchRequestSchema,
@@ -31,6 +39,7 @@ import {
 import {
   THREAD_SESSION_OPTIONS_STATE_KIND,
   THREAD_PROVIDER_MODEL_CATALOG_STATE_KIND,
+  getThreadEventScopeTurnId,
   requireThreadEventScopeTurnId,
   type ClientTurnRequestId,
   type ThreadEventType,
@@ -46,16 +55,20 @@ import {
   maybePruneActiveThreadEventHistory,
 } from "../services/system/event-pruning.js";
 import {
+  completeTurnLifecycle,
   executeTurnEndFollowUpBestEffort,
-  idleFollowUpForTurnEnd,
-  planTurnEnd,
   type TurnEndFollowUp,
 } from "../services/threads/turn-end-follow-ups.js";
-import type { ThreadLifecycleEffect } from "../services/threads/lifecycle/machine.js";
+import type {
+  ThreadLifecycleEffect,
+  ThreadLifecycleInput,
+} from "../services/threads/lifecycle/machine.js";
 import {
+  runThreadLifecycleInTransaction,
   runThreadLifecycleTransaction,
   type ThreadLifecycleOutcome,
 } from "../services/threads/lifecycle/run.js";
+import { NotificationBuffer } from "../services/lib/notification-buffer.js";
 import { finishThreadLifecycle } from "../services/threads/lifecycle/finish.js";
 import { deferAfterResponse } from "../services/lib/response-deferral.js";
 import { runtimeErrorLogFields } from "../services/lib/error-log-fields.js";
@@ -80,6 +93,7 @@ import {
 interface ToStoredEventArgs {
   envelope: HostDaemonEventEnvelope;
   environmentId: string | null;
+  hostId: string;
 }
 
 interface ResolvePostableEventBatchEntriesArgs {
@@ -104,9 +118,26 @@ interface RejectedDaemonEventSummary {
 }
 
 interface ResolveEventsToApplyArgs {
+  acceptedEvents: AcceptedDaemonEvent[];
   db: AppDeps["db"];
+  eventInputs: AppendDaemonEventInput[];
   events: HostDaemonEventEnvelope[];
   insertedEventIndexes: number[];
+  replayedEventIndexes: number[];
+}
+
+interface EventLifecycleTarget {
+  pendingInteractionsInterruptReason: string | null;
+  replayReceiptId: string | null;
+  sequence: number | null;
+  threadId: string;
+  turnId: string | null;
+}
+
+interface EventToApply {
+  entry: HostDaemonEventEnvelope;
+  replayReceiptId: string | null;
+  sequence: number | null;
 }
 
 interface NotifyInsertedEventThreadsDeps {
@@ -276,12 +307,22 @@ function resolveProviderIdentifiers(event: HostDaemonEventEnvelope["event"]): {
   }
 }
 
+function daemonEventRowId(hostId: string, eventId: string): string {
+  return `evt_${createHash("sha256")
+    .update(`${hostId}\0${eventId}`)
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
 function toStoredEvent(args: ToStoredEventArgs): AppendDaemonEventInput {
   const envelope = args.envelope;
   const { scope, type, threadId, ...data } = envelope.event;
   return {
     threadId: envelope.threadId,
     environmentId: args.environmentId,
+    ...(envelope.eventId === undefined
+      ? {}
+      : { id: daemonEventRowId(args.hostId, envelope.eventId) }),
     ...resolveProviderIdentifiers(envelope.event),
     scope,
     type,
@@ -322,11 +363,11 @@ function notifyInsertedEventThreads(
 
 async function applyEventEffects(
   deps: LoggedPendingInteractionWorkSessionDeps,
-  events: HostDaemonEventEnvelope[],
+  events: EventToApply[],
 ): Promise<TurnEndFollowUp[]> {
   const followUps: TurnEndFollowUp[] = [];
   const failedParentNotificationThreadIds = new Set<string>();
-  for (const entry of events) {
+  for (const { entry, replayReceiptId, sequence } of events) {
     try {
       const event = entry.event;
       if (event.type === "turn/started") {
@@ -337,15 +378,26 @@ async function applyEventEffects(
           type: event.type,
           scope: event.scope,
         });
-        const outcome = runThreadLifecycleTransaction(deps, entry.threadId, {
-          type: "turn.started",
-          aimedAtByStop: isTurnAimedAtByEarlierStop(deps.db, {
+        const outcome = runEventLifecycleTransaction(
+          deps,
+          {
+            pendingInteractionsInterruptReason: null,
+            replayReceiptId,
+            sequence,
             threadId: entry.threadId,
             turnId,
-          }),
-          turnId,
-          now: Date.now(),
-        });
+          },
+          {
+            type: "turn.started",
+            aimedAtByStop: isTurnAimedAtByEarlierStop(deps.db, {
+              threadId: entry.threadId,
+              turnId,
+            }),
+            turnId,
+            now: Date.now(),
+          },
+        );
+        if (outcome === null) continue;
         await finishLifecycleFromEvents(deps, outcome, followUps);
         continue;
       }
@@ -404,6 +456,7 @@ async function applyEventEffects(
         const thread = getThread(deps.db, entry.threadId);
         if (
           thread === null ||
+          sequence === null ||
           !hasRootStoredTurnStarted(deps.db, {
             threadId: entry.threadId,
             turnId,
@@ -418,39 +471,16 @@ async function applyEventEffects(
         if (aimedAtByStop && event.status !== "interrupted") {
           continue;
         }
-        const outcome = runThreadLifecycleTransaction(deps, entry.threadId, {
-          type: "turn.completed",
-          turnId,
-          status: event.status,
-        });
-        const ended = outcome.effects.find(
-          (effect) => effect.kind === "turn-ended",
-        );
-        await finishLifecycleFromEvents(deps, outcome, followUps);
-        if (ended === undefined || ended.kind !== "turn-ended") {
-          continue;
-        }
-        const plan = planTurnEnd(deps, {
+        const { outcome, idleFollowUp } = await completeTurnLifecycle(deps, {
           aimedAtByStop,
+          completionSequence: sequence,
           failedParentNotificationThreadIds,
+          replayReceiptId,
           status: event.status,
           thread,
           turnId,
         });
-        const idle =
-          ended.disposition === "applied" && outcome.thread?.status === "idle";
-        const idleFollowUp = idle
-          ? idleFollowUpForTurnEnd(plan, {
-              status: event.status,
-              threadId: entry.threadId,
-            })
-          : null;
-        if (
-          plan.continuation === null ||
-          !(idle || ended.disposition === "held")
-        ) {
-          followUps.push(...plan.parentNotifications);
-        }
+        await finishLifecycleFromEvents(deps, outcome, followUps);
         if (idleFollowUp !== null) {
           followUps.push(idleFollowUp);
         }
@@ -465,20 +495,27 @@ async function applyEventEffects(
         if (getThread(deps.db, entry.threadId) === null) {
           continue;
         }
-        if (event.code === "provider_process_exited") {
-          deps.pendingInteractions.interruptPendingInteractionsForThreadIds({
-            threadIds: [entry.threadId],
-            reason:
-              "Provider process exited while awaiting user interaction; retry the thread to continue",
-          });
-        }
-        const outcome = runThreadLifecycleTransaction(deps, entry.threadId, {
-          type: "provider.failed",
-          unstartedRequestId:
-            event.scope.kind === "thread"
-              ? findUnstartedTurnRequestId(deps, entry.threadId)
-              : null,
-        });
+        const outcome = runEventLifecycleTransaction(
+          deps,
+          {
+            pendingInteractionsInterruptReason:
+              event.code === "provider_process_exited"
+                ? "Provider process exited while awaiting user interaction; retry the thread to continue"
+                : null,
+            replayReceiptId,
+            sequence,
+            threadId: entry.threadId,
+            turnId: getThreadEventScopeTurnId(event.scope) ?? null,
+          },
+          {
+            type: "provider.failed",
+            unstartedRequestId:
+              event.scope.kind === "thread"
+                ? findUnstartedTurnRequestId(deps, entry.threadId)
+                : null,
+          },
+        );
+        if (outcome === null) continue;
         await finishLifecycleFromEvents(deps, outcome, followUps);
         continue;
       }
@@ -494,6 +531,78 @@ async function applyEventEffects(
     }
   }
   return followUps;
+}
+
+function runEventLifecycleTransaction(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  target: EventLifecycleTarget,
+  input: ThreadLifecycleInput,
+): ThreadLifecycleOutcome | null {
+  const notifications = new NotificationBuffer();
+  const outcome = deps.db.transaction(
+    (tx) => {
+      if (
+        (target.sequence !== null &&
+          isEventLifecycleApplied(tx, {
+            threadId: target.threadId,
+            sequence: target.sequence,
+          })) ||
+        (target.replayReceiptId !== null &&
+          !isReplayedLifecycleEffectDue(
+            tx,
+            findStoredEventReceipt(tx, target.replayReceiptId),
+            target.turnId,
+          ))
+      ) {
+        return null;
+      }
+      const outcome = runThreadLifecycleInTransaction(
+        { ...deps, db: tx, hub: notifications },
+        target.threadId,
+        input,
+      );
+      if (target.pendingInteractionsInterruptReason !== null) {
+        deps.pendingInteractions.interruptPendingInteractionsForThreadIdsInTransaction(
+          { db: tx, hub: notifications },
+          {
+            threadIds: [target.threadId],
+            reason: target.pendingInteractionsInterruptReason,
+          },
+        );
+      }
+      if (target.sequence !== null) {
+        markEventLifecycleApplied(tx, {
+          threadId: target.threadId,
+          sequence: target.sequence,
+        });
+      }
+      return outcome;
+    },
+    { behavior: "immediate" },
+  );
+  notifications.flushInto(deps.hub);
+  return outcome;
+}
+
+function isReplayedLifecycleEffectDue(
+  db: DbQueryConnection,
+  receipt: StoredEventReceipt | null,
+  turnId: string | null,
+): boolean {
+  if (receipt === null) return false;
+  if (
+    turnId !== null &&
+    findLastRootStoredTurnStarted(db, { threadId: receipt.threadId })
+      ?.turnId !== turnId
+  ) {
+    return false;
+  }
+  return !hasRootTurnSupersessionAfter(db, {
+    afterSequence: receipt.sequence,
+    interruptionsSupersede: true,
+    threadId: receipt.threadId,
+    turnId,
+  });
 }
 
 const EVENT_DEFERRED_LIFECYCLE_EFFECTS: ReadonlySet<
@@ -627,24 +736,85 @@ function shouldApplyEventEffect(args: ShouldApplyEventEffectArgs): boolean {
   return true;
 }
 
-function resolveEventsToApply(
+function resolveReplayedEventToApply(
   args: ResolveEventsToApplyArgs,
-): HostDaemonEventEnvelope[] {
+  index: number,
+  insertedRowIds: ReadonlySet<string>,
+): EventToApply | "legacy" | null {
+  const entry = args.events[index];
+  const rowId = args.eventInputs[index]?.id;
+  if (
+    entry === undefined ||
+    rowId === undefined ||
+    (entry.event.type !== "turn/started" &&
+      entry.event.type !== "turn/completed" &&
+      entry.event.type !== "system/error")
+  ) {
+    return "legacy";
+  }
+  const receipt = findStoredEventReceipt(args.db, rowId);
+  if (
+    receipt === null ||
+    receipt.type !== entry.event.type ||
+    insertedRowIds.has(rowId)
+  ) {
+    return null;
+  }
+  const turnId = getThreadEventScopeTurnId(entry.event.scope) ?? null;
+  if (receipt.threadId !== entry.threadId || receipt.turnId !== turnId) {
+    return null;
+  }
+  if (
+    entry.event.type === "turn/completed" &&
+    receipt.status !== entry.event.status
+  ) {
+    return null;
+  }
+  return { entry, replayReceiptId: rowId, sequence: receipt.sequence };
+}
+
+function resolveEventsToApply(args: ResolveEventsToApplyArgs): EventToApply[] {
   const insertedEventIndexLookup = new Set(args.insertedEventIndexes);
+  const replayedEventIndexLookup = new Set(args.replayedEventIndexes);
+  const insertedRowIds = new Set(
+    args.insertedEventIndexes.flatMap((index) => {
+      const rowId = args.eventInputs[index]?.id;
+      return rowId === undefined ? [] : [rowId];
+    }),
+  );
+  const sequenceByEventIndex = new Map(
+    args.insertedEventIndexes.map((eventIndex, acceptedIndex) => [
+      eventIndex,
+      args.acceptedEvents[acceptedIndex]?.sequence ?? null,
+    ]),
+  );
   const completedTurnKeyLookup = listCompletedTurnKeysForStartedEvents({
     batchEvents: args.events,
     db: args.db,
     insertedEventIndexLookup,
   });
 
-  return args.events.filter((entry, index) =>
-    shouldApplyEventEffect({
+  return args.events.flatMap((entry, index) => {
+    if (replayedEventIndexLookup.has(index)) {
+      const replayed = resolveReplayedEventToApply(args, index, insertedRowIds);
+      if (replayed === null) return [];
+      if (replayed !== "legacy") return [replayed];
+    }
+    return shouldApplyEventEffect({
       completedTurnKeyLookup,
       entry,
       index,
       insertedEventIndexLookup,
-    }),
-  );
+    })
+      ? [
+          {
+            entry,
+            replayReceiptId: null,
+            sequence: sequenceByEventIndex.get(index) ?? null,
+          },
+        ]
+      : [];
+  });
 }
 
 function resolveActivePruneCandidates(
@@ -876,6 +1046,7 @@ export function registerInternalEventRoutes(app: Hono, deps: AppDeps): void {
         return toStoredEvent({
           envelope: entry.envelope,
           environmentId: entry.environmentId,
+          hostId: session.hostId,
         });
       });
       const postableEvents = labelledEntries.map((entry) => entry.envelope);
@@ -927,9 +1098,12 @@ export function registerInternalEventRoutes(app: Hono, deps: AppDeps): void {
       const followUps = await applyEventEffects(
         deps,
         resolveEventsToApply({
+          acceptedEvents: appendResult.acceptedEvents,
           db: deps.db,
+          eventInputs,
           events: postableEvents,
           insertedEventIndexes: appendResult.insertedInputIndexes,
+          replayedEventIndexes: appendResult.replayedInputIndexes,
         }),
       );
       for (const candidate of resolveActivePruneCandidates({
