@@ -455,6 +455,49 @@ const subagentConfigCases = [
   { userAgent: undefined, modern: false },
 ];
 
+it.each(["thread/start", "thread/resume", "thread/fork"] as const)(
+  "%s sets only the requested auto-compaction override",
+  async (method) => {
+    for (const limit of [undefined, 200_000]) {
+      const id = limit === undefined ? 1 : 2;
+      harness.sendRequest(id, method, {
+        threadId: THREAD_ID,
+        cwd: workspaceDir,
+        instructionMode: "append",
+        ...(method === "thread/resume"
+          ? { providerThreadId: "existing-thread" }
+          : {}),
+        ...(method === "thread/fork"
+          ? { sourceProviderThreadId: "existing-thread" }
+          : {}),
+        options: {
+          ...FULL_ACCESS_SESSION_OPTIONS,
+          ...(limit === undefined
+            ? {}
+            : { providerOptions: { codexAutoCompactTokenLimit: limit } }),
+        },
+      });
+      expect((await harness.waitForResponse(id)).error).toBeUndefined();
+    }
+    const configs = recordedRequests()
+      .filter((entry) => entry.method === method)
+      .map(
+        ({ params }) =>
+          z.object({ config: z.record(z.string(), z.unknown()) }).parse(params)
+            .config,
+      );
+    expect(configs).toHaveLength(2);
+    expect(configs[0]).not.toHaveProperty("model_auto_compact_token_limit");
+    expect(configs[1]).toEqual({
+      ...configs[0],
+      model_auto_compact_token_limit: 200_000,
+    });
+    for (const config of configs) {
+      expect(config).not.toHaveProperty("model_context_window");
+    }
+  },
+);
+
 for (const method of [
   "thread/start",
   "thread/resume",
