@@ -1,3 +1,4 @@
+import { hasLocalTurnRequestIndex } from "../local-turn-request-index.js";
 import { markThreadPruningWork } from "./thread-pruning-work.js";
 import { isBeforeLatestThreadEvent } from "./event-pruning-guards.js";
 import { rewindResolvedItemPruning } from "./resolved-item-pruning.js";
@@ -2022,6 +2023,13 @@ export function listStoredClientTurnRequestRowsByKeys(
   args: ListStoredClientTurnRequestRowsByKeysArgs,
 ): StoredEventRow[] {
   const requestType = "client/turn/requested" satisfies ThreadEventType;
+  const indexed = hasLocalTurnRequestIndex(db);
+  const candidateTable = indexed
+    ? sql`${events} AS candidate INDEXED BY local_bb_turn_request_thread_request_sequence_idx`
+    : sql`${events} AS candidate INDEXED BY events_thread_type_sequence_idx`;
+  const candidateTypeFilter = indexed
+    ? sql`candidate.type = 'client/turn/requested'`
+    : sql`candidate.type = ${requestType}`;
   const rows = queryInSqliteVariableBatches({
     dedupeKey: (key) => `${key.threadId}\0${key.requestId}`,
     fixedVariableCount: 1,
@@ -2041,9 +2049,9 @@ export function listStoredClientTurnRequestRowsByKeys(
           events,
           sql`${events.id} = (
             SELECT candidate.id
-            FROM ${events} AS candidate INDEXED BY events_thread_type_sequence_idx
+            FROM ${candidateTable}
             WHERE candidate.thread_id = requested.column1
-              AND candidate.type = ${requestType}
+              AND ${candidateTypeFilter}
               AND candidate.sequence < requested.column3
               AND json_extract(candidate.data, '$.requestId') = requested.column2
             ORDER BY candidate.sequence DESC

@@ -1,4 +1,5 @@
 export { afterCommit, createConnection } from "./connection.js";
+export { initializeLocalTurnRequestIndex } from "./local-turn-request-index.js";
 export type {
   DbConnection,
   DbQueryConnection,
