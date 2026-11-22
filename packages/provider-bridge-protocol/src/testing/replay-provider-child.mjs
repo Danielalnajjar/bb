@@ -278,6 +278,28 @@ function buildSegments(entries, dialect) {
   return segments;
 }
 
+function orderClaudeInitialization(segment) {
+  const initialization = segment[0]?.classified;
+  if (!DIALECTS["claude-cli"].isInitialize(initialization ?? {})) {
+    return -1;
+  }
+  const responseIndex = segment.findIndex(
+    (step) =>
+      step.dir === "provider→bridge" &&
+      step.classified.kind === "response" &&
+      step.classified.id === initialization.id,
+  );
+  const inputIndex = segment.findIndex(
+    (step) => step.dir === "bridge→provider" && step.classified.key === "user",
+  );
+  if (inputIndex !== -1 && inputIndex < responseIndex) {
+    const [input] = segment.splice(inputIndex, 1);
+    segment.splice(responseIndex, 0, input);
+    return responseIndex - 1;
+  }
+  return responseIndex;
+}
+
 function claimSegmentIndex(stateDir) {
   mkdirSync(stateDir, { recursive: true });
   for (let index = 0; index < 10_000; index += 1) {
@@ -507,6 +529,8 @@ function main() {
     process.argv.includes("--no-session-persistence");
   const segmentIndex = diagnosticFork ? null : claimSegmentIndex(args.state);
   let script = segmentIndex === null ? [] : (segments[segmentIndex] ?? []);
+  const claudeInitializationResponseIndex =
+    args.dialect === "claude-cli" ? orderClaudeInitialization(script) : -1;
   const log = (text) =>
     process.stderr.write(`[replay-child #${segmentIndex}] ${text}\n`);
   if (script.length === 0) {
@@ -630,6 +654,7 @@ function main() {
       if (step.dir === "provider→bridge") {
         if (
           step.classified.kind !== "response" &&
+          position > claudeInitializationResponseIndex &&
           !cursorAllows(readCursor(args.state), step)
         ) {
           // Paced by the harness: the next runtime request comes first. Only

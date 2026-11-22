@@ -191,6 +191,20 @@ export class SdkSession {
     return !this.inputDone;
   }
 
+  async waitForInitialization(): Promise<void> {
+    const query = this.query;
+    if (!query) {
+      throw new Error("Claude SDK input stream is closed");
+    }
+    try {
+      await query.initializationResult();
+    } catch (error) {
+      throw new Error(
+        buildSdkDoneErrorMessage({ error, stderrTail: this.stderrTail }),
+      );
+    }
+  }
+
   async setPermissionMode(mode: ClaudePermissionMode): Promise<void> {
     await this.query?.setPermissionMode(mode);
     this.options.permissionMode = mode;
