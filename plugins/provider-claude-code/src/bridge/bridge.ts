@@ -274,6 +274,7 @@ interface ThreadSession {
 }
 
 interface ThreadAttachment {
+  canResumeProviderSession: boolean;
   envSignature: string;
   sessionConstructionConfig: SessionConstructionConfig;
   sessionOptions: SdkSessionOptions;
@@ -290,6 +291,7 @@ interface ThreadAttachment {
 }
 
 interface CreateThreadAttachmentArgs {
+  canResumeProviderSession: boolean;
   permissionEscalation: PermissionEscalation | null;
   permissionMode: ClaudePermissionMode;
   liveSettings: ClaudeLiveSessionSettings;
@@ -1038,6 +1040,7 @@ function emitCanonicalTurnInputAccepted(
   threadId: string,
   promptId: string,
 ): void {
+  threadSession.attachment.canResumeProviderSession = true;
   threadSession.contextUsageCollector.invalidate();
   threadSession.translator.trackPushedPrompt(threadId, promptId);
   sendThreadDeltas(
@@ -1138,6 +1141,7 @@ function createThreadAttachment(
   args: CreateThreadAttachmentArgs,
 ): ThreadAttachment {
   const attachment: ThreadAttachment = {
+    canResumeProviderSession: args.canResumeProviderSession,
     envSignature: environmentSignature(
       readConfigEnvOverrides(args.sessionConstructionConfig.config),
     ),
@@ -1488,7 +1492,12 @@ function replaceThreadSession(args: ReplaceThreadSessionArgs): ThreadSession {
 
   const replacementSession = createThreadSession(args.attachment);
   args.attachment.residentSession = replacementSession;
-  startResidentThreadSession(args.attachment, args.providerThreadId);
+  startResidentThreadSession(
+    args.attachment,
+    args.attachment.canResumeProviderSession
+      ? args.providerThreadId
+      : undefined,
+  );
   sendThreadIdentity(args.threadId, args.providerThreadId);
   sendSessionReset(args.threadId);
   return replacementSession;
@@ -2410,12 +2419,12 @@ async function handleRequest(request: ClaudeCodeJsonRpcRequest): Promise<void> {
   }
 }
 
-function attachThreadSession(
+async function attachThreadSession(
   id: string | number,
   params: SessionConstructionParams,
   providerThreadId: string,
   resume: boolean,
-): void {
+): Promise<void> {
   const threadIdRef = { current: params.threadId };
   const env = buildSessionEnv(readConfigEnvOverrides(params.config));
   const sessionOptions = buildTrackedSessionOptions(params, env, threadIdRef);
@@ -2433,6 +2442,7 @@ function attachThreadSession(
   }
 
   const attachment = createThreadAttachment({
+    canResumeProviderSession: resume,
     liveSettings: toInitialLiveSessionSettings(params),
     permissionEscalation: params.permissionEscalation,
     permissionMode: params.permissionMode,
@@ -2443,7 +2453,22 @@ function attachThreadSession(
     threadIdRef,
   });
   threadAttachments.set(params.threadId, attachment);
-  startResidentThreadSession(attachment, resume ? providerThreadId : undefined);
+  try {
+    const threadSession = startResidentThreadSession(
+      attachment,
+      resume ? providerThreadId : undefined,
+    );
+    if (!resume) {
+      await threadSession.session.waitForInitialization();
+    }
+  } catch (error) {
+    await closeThreadSession({
+      graceful: false,
+      message: "Claude session failed to initialize",
+      threadId: params.threadId,
+    });
+    throw error;
+  }
 
   sendThreadIdentity(params.threadId, providerThreadId);
   sendSessionReset(params.threadId);
@@ -2463,7 +2488,7 @@ async function handleThreadStart(
     });
   }
 
-  attachThreadSession(id, params, randomUUID(), false);
+  await attachThreadSession(id, params, randomUUID(), false);
 }
 
 async function handleThreadResume(
@@ -2528,7 +2553,10 @@ async function handleThreadResume(
     });
   }
 
-  attachThreadSession(id, params, requestedProviderThreadId, true);
+  const resume =
+    existing?.providerThreadId !== requestedProviderThreadId ||
+    existing.canResumeProviderSession;
+  await attachThreadSession(id, params, requestedProviderThreadId, resume);
 }
 
 async function handleThreadFork(
@@ -2562,7 +2590,7 @@ async function handleThreadFork(
     return;
   }
 
-  attachThreadSession(id, params, forkedProviderThreadId, true);
+  await attachThreadSession(id, params, forkedProviderThreadId, true);
 }
 
 async function toClaudeSessionParams(
@@ -2655,6 +2683,7 @@ async function runTurnInput(
   }
 
   try {
+    await threadSession.session.waitForInitialization();
     const promptId = await pushPromptInput(
       threadSession,
       promptText,

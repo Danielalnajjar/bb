@@ -2,6 +2,10 @@
 
 Follow-up findings for this fork. GitHub issues are off on the fork, so findings that a change does not fix go here. Each entry gives the finding, its evidence, and why it was not fixed in the change that found it. Remove an entry when its fix merges.
 
+## Claude turn delivery
+
+- **A broken stdin pipe can look like accepted input after Claude initializes.** The pinned Claude Agent SDK takes a prompt from the bridge’s async iterator before writing it to Claude. With a fixture that completes the SDK initialization handshake and then rejects the first prompt write with `EPIPE`, Claude receives no prompt, but the bridge records `turn/input/accepted` and Retry sends only “Please continue.” This is separate from the pre-launch refusal fixed in w-1466. A follow-up needs a prompt-specific delivery acknowledgement without replaying a prompt Claude already received.
+
 ## Restart continuations
 
 - **Plugins get no typed signal that BB is continuing a cut turn.** A plugin that keeps per-turn state (Crew) has to infer from event order, the queue and retry ancestry that a restart-cut turn will be continued. Two residual races remain, and each costs at most one lead notice. In one, Crew is offline for an older failure when a restart cuts a newer turn. In the other, Crew is still handling a refused continuation when a later turn is cut. Fix: put the restart continuation on the failure or interruption event, or on the SDK thread response, then delete Crew's inference. It needs a plugin SDK change, which the queue-admission change (`fix/queue-admission-0501`) could not make.
