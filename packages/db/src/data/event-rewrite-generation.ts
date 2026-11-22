@@ -3,6 +3,7 @@ import type { DbConnection, DbQueryConnection } from "../connection.js";
 import { threadConversationOutlines } from "../schema.js";
 
 const generationsByThreadId = new Map<string, number>();
+const timelineOrderingGenerationsByThreadId = new Map<string, number>();
 
 export function getThreadEventRewriteGeneration(threadId: string): number {
   return generationsByThreadId.get(threadId) ?? 0;
@@ -21,8 +22,20 @@ export function bumpThreadEventRewriteGeneration(
   );
 }
 
+export function getThreadTimelineOrderingGeneration(threadId: string): number {
+  return timelineOrderingGenerationsByThreadId.get(threadId) ?? 0;
+}
+
+export function bumpThreadTimelineOrderingGeneration(threadId: string): void {
+  timelineOrderingGenerationsByThreadId.set(
+    threadId,
+    getThreadTimelineOrderingGeneration(threadId) + 1,
+  );
+}
+
 export function forgetThreadEventRewriteGenerations(): void {
   generationsByThreadId.clear();
+  timelineOrderingGenerationsByThreadId.clear();
 }
 
 export function getDatabaseDataVersion(db: DbConnection): number {

@@ -298,6 +298,93 @@ describe("timeline grouping context cache", () => {
     });
   });
 
+  it("retains cached ordering rows across non-ordering event pruning", () => {
+    withTestThread((testThread) => {
+      const warmMaxSeq = appendRows(testThread, [
+        turnStarted("turn-1"),
+        userRequest("request-1"),
+        accepted("request-1", "turn-1"),
+        delta("turn-1", "chunk-1"),
+        delta("turn-1", "chunk-2"),
+      ]);
+      const warm = expectCachedEqualsCold(testThread, warmMaxSeq);
+
+      const resolvedMaxSeq = appendRows(testThread, [
+        {
+          data: {
+            item: {
+              id: "message-1",
+              text: "chunk-1chunk-2",
+              type: "agentMessage",
+            },
+          },
+          itemId: "message-1",
+          itemKind: "agentMessage",
+          turnId: "turn-1",
+          type: "item/completed",
+        },
+        delta("turn-1", "tail"),
+      ]);
+
+      let removed = 0;
+      for (let pass = 0; pass < 10; pass += 1) {
+        const result = advanceThreadPruning(testThread.db, {
+          threadId: testThread.thread.id,
+        });
+        removed += result.removed;
+        if (result.action === "cycle-complete") break;
+      }
+      expect(removed).toBeGreaterThan(0);
+
+      const nearStatements = captureStatementSql(testThread.db, () => {
+        expect(expectCachedEqualsCold(testThread, warmMaxSeq)).toBe(warm);
+        expect(expectCachedEqualsCold(testThread, resolvedMaxSeq)).toBe(warm);
+      });
+      expect(
+        nearStatements.filter((source) =>
+          source.includes("'$.clientRequestId'"),
+        ),
+      ).toEqual([]);
+
+      const orderingQueryParams: unknown[][] = [];
+      const raw = testThread.db.$client;
+      const originalPrepare = raw.prepare.bind(raw);
+      Object.defineProperty(raw, "prepare", {
+        configurable: true,
+        writable: true,
+        value: (source: string) => {
+          const stmt = originalPrepare(source);
+          if (!source.includes("'$.clientRequestId'")) return stmt;
+          const originalAll = stmt.all.bind(stmt);
+          Object.defineProperty(stmt, "all", {
+            configurable: true,
+            value: (...params: unknown[]) => {
+              orderingQueryParams.push(params);
+              return originalAll(...params);
+            },
+          });
+          return stmt;
+        },
+      });
+      try {
+        const nextOrderingMaxSeq = appendRows(testThread, [
+          turnStarted("turn-2"),
+          userRequest("request-2"),
+          accepted("request-2", "turn-2"),
+        ]);
+        expectCachedEqualsCold(testThread, nextOrderingMaxSeq);
+      } finally {
+        Object.defineProperty(raw, "prepare", {
+          configurable: true,
+          writable: true,
+          value: originalPrepare,
+        });
+      }
+      expect(orderingQueryParams.length).toBe(1);
+      expect(orderingQueryParams[0]?.[1]).toBe(warmMaxSeq + 1);
+    });
+  });
+
   it("matches a cold computation over randomized appends, rewrites and prunes", () => {
     let comparisons = 0;
     let changedContexts = 0;

@@ -1,7 +1,7 @@
 import { threadEventJoinsRunningTurn } from "@bb/thread-view";
 import {
   getDatabaseDataVersion,
-  getThreadEventRewriteGeneration,
+  getThreadTimelineOrderingGeneration,
   hasTimelineGroupingContextChangesInRange,
   listTimelineOrderingContext,
   type DbConnection,
@@ -233,7 +233,7 @@ export function getTimelineGroupingContext(
     orderingContexts.set(db, cache);
   }
   const key = JSON.stringify([args.threadId, args.sequenceStart]);
-  const generation = getThreadEventRewriteGeneration(args.threadId);
+  const generation = getThreadTimelineOrderingGeneration(args.threadId);
   const dataVersion = getDatabaseDataVersion(db);
   const entries = (cache.get(key) ?? []).filter(
     (entry) =>

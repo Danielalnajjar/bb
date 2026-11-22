@@ -77,6 +77,7 @@ import {
 import { truncatedEventDataColumn } from "./event-output-truncation.js";
 import {
   bumpThreadEventRewriteGeneration,
+  bumpThreadTimelineOrderingGeneration,
   getDatabaseDataVersion,
   getThreadEventRewriteGeneration,
 } from "./event-rewrite-generation.js";
@@ -355,6 +356,7 @@ export function deleteThreadEventSuffixInTransaction(
     .run();
   if (result.changes > 0) {
     bumpThreadEventRewriteGeneration(db, args.threadId);
+    bumpThreadTimelineOrderingGeneration(args.threadId);
     rewindResolvedItemPruning(db, {
       threadId: args.threadId,
       beforeSequence: args.cutoffSequence,
@@ -562,6 +564,7 @@ export function insertEvents(
           const highWaterMark = highWaterMarks[input.threadId];
           if (highWaterMark !== undefined && input.sequence <= highWaterMark) {
             bumpThreadEventRewriteGeneration(tx, input.threadId);
+            bumpThreadTimelineOrderingGeneration(input.threadId);
             rewindResolvedItemPruning(tx, {
               threadId: input.threadId,
               beforeSequence: input.sequence,
