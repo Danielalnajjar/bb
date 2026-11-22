@@ -4199,8 +4199,10 @@ describe("bridge", () => {
 
     try {
       const threadId = "thread-resume-reconfigure-permissions";
-      bridge.sendRequest(1, "thread/start", {
+      const providerThreadId = "provider-thread-reconfigure-permissions";
+      bridge.sendRequest(1, "thread/resume", {
         threadId,
+        providerThreadId,
         cwd: "/tmp/worktree",
         instructionMode: "append",
         options: {
@@ -4214,8 +4216,7 @@ describe("bridge", () => {
           },
         },
       });
-      const startResponse = await bridge.waitForResponse(1);
-      const providerThreadId = getProviderThreadIdFromResult(startResponse);
+      await bridge.waitForResponse(1);
 
       expect(queries).toHaveLength(1);
       expect(getLatestQueryOptions()).not.toHaveProperty("sandbox");
@@ -5507,6 +5508,19 @@ describe("bridge", () => {
       const startResponse = await bridge.waitForResponse(1);
       const providerThreadId = getProviderThreadIdFromResult(startResponse);
 
+      bridge.sendRequest(4, "turn/start", {
+        ...canonicalTurnParams({
+          threadId,
+          input: [
+            { type: "text", text: "Start the original task", mentions: [] },
+          ],
+        }),
+        providerThreadId,
+        clientRequestId: "creq_abcdefghjm",
+      });
+      await readNextPromptText(getLatestQueryCall());
+      await bridge.waitForResponse(4);
+
       queries[0]?.fail(new Error("Claude SDK exploded"));
       await bridge.flushWork();
 
@@ -6042,6 +6056,92 @@ describe("bridge", () => {
       queries[1]?.finish();
       await bridge.waitForResponse(14);
     } finally {
+      bridge.restore();
+    }
+  });
+
+  it("leaves no resumable identity when a new Claude launch is refused", async () => {
+    const threadId = "thread-launch-refusal";
+    const bridge = createBridgeJsonRpcTestHarness(handleLine);
+    const failedLaunch = createControlledClaudeQuery();
+    const replacement = createControlledClaudeQuery();
+    const refusal = new Error("account admission is missing (exit 78)");
+    let rejectInitialization = (_error: Error): void => {};
+    const initialization = new Promise<void>((_resolve, reject) => {
+      rejectInitialization = reject;
+    });
+    void initialization.catch(() => {});
+    failedLaunch.initializationResult.mockReturnValue(initialization);
+    replacement.initializationResult.mockResolvedValue({});
+    queryMock
+      .mockReturnValueOnce(failedLaunch)
+      .mockReturnValueOnce(replacement);
+    const threadParams = {
+      cwd: "/tmp/worktree",
+      instructionMode: "append",
+      options: canonicalOptions({}),
+      threadId,
+    };
+
+    try {
+      bridge.sendRequest(1, "thread/start", threadParams);
+      await bridge.flushWork();
+      expect(bridge.hasResponse(1)).toBe(false);
+      failedLaunch.fail(refusal);
+      rejectInitialization(refusal);
+      await expect(bridge.waitForResponse(1)).resolves.toMatchObject({
+        error: {
+          message: expect.stringContaining("account admission is missing"),
+        },
+      });
+      expect(
+        assembleCapturedThreadEvents(bridge.messages, "claude-code").filter(
+          (event) =>
+            event.type === "thread/identity" ||
+            event.type === "turn/input/accepted",
+        ),
+      ).toEqual([]);
+
+      bridge.sendRequest(2, "thread/start", threadParams);
+      const providerThreadId = getProviderThreadIdFromResult(
+        await bridge.waitForResponse(2),
+      );
+      const promptText = "Reply with the original task marker";
+      bridge.sendRequest(3, "turn/start", {
+        ...canonicalTurnParams({
+          threadId,
+          input: [{ type: "text", text: promptText, mentions: [] }],
+        }),
+        providerThreadId,
+        clientRequestId: "creq_abcdefghjm",
+      });
+      expect(getLatestQueryOptions()).toMatchObject({
+        sessionId: providerThreadId,
+      });
+      expect(getLatestQueryOptions().resume).toBeUndefined();
+      await expect(readNextPromptText(getLatestQueryCall())).resolves.toBe(
+        promptText,
+      );
+      await expect(bridge.waitForResponse(3)).resolves.toMatchObject({
+        result: { threadId },
+      });
+
+      replacement.fail(new Error("Claude exited without producing output"));
+      await bridge.flushWork();
+      const events = assembleCapturedThreadEvents(
+        bridge.messages,
+        "claude-code",
+      );
+      expect(
+        events.filter((event) => event.type === "turn/input/accepted"),
+      ).toEqual([
+        expect.objectContaining({ clientRequestId: "creq_abcdefghjm" }),
+      ]);
+      expect(getFailedTurns(bridge.messages)).toHaveLength(1);
+    } finally {
+      rejectInitialization(refusal);
+      failedLaunch.finish();
+      replacement.finish();
       bridge.restore();
     }
   });
@@ -6781,7 +6881,7 @@ describe("canonical model context-window hint", () => {
     permissionEscalation: null,
   };
 
-  it("rebuilds with the same provider session when the turn environment changes", async () => {
+  it("keeps the first turn fresh when its environment changes", async () => {
     const bridge = createBridgeJsonRpcTestHarness(handleLine);
     const queries: ControlledClaudeQuery[] = [];
     queryMock.mockImplementation(() => {
@@ -6825,8 +6925,9 @@ describe("canonical model context-window hint", () => {
           CLAUDE_CODE_DISABLE_1M_CONTEXT: "1",
           CLAUDE_CODE_ARTIFACT: "1",
         },
-        resume: providerThreadId,
+        sessionId: providerThreadId,
       });
+      expect(getLatestQueryOptions().resume).toBeUndefined();
       await expect(readNextPromptText(getLatestQueryCall())).resolves.toBe(
         "continue",
       );
