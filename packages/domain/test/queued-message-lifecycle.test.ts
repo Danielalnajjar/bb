@@ -60,7 +60,7 @@ describe("QUEUED_MESSAGE_LIFECYCLE", () => {
   it("only leaves a claim by releasing it or re-queueing it", () => {
     expect(Object.keys(QUEUED_MESSAGE_LIFECYCLE.claimed).sort()).toEqual([
       "claim.released",
-      "wait.recorded",
+      "dispatch.requeued",
     ]);
     expect(
       evaluateQueuedMessageTransition({

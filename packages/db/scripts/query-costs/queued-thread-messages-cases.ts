@@ -693,7 +693,7 @@ export const QUEUED_THREAD_MESSAGES_COST_CASES: readonly QueryCostCase[] = [
         claims: claimedGroup.map(({ id, claimToken }) => ({ id, claimToken })),
         threadId: fixture.threadId,
         waitingOn: { kind: "thread-busy" },
-        sendAt: null,
+        preserveSchedule: false,
         recheckAt: null,
       }),
   },

@@ -64,7 +64,7 @@ describe("queued message state", () => {
       claims: [{ id: row.id, claimToken: claimed!.claimToken }],
       threadId,
       waitingOn: { kind: "plugin", pluginId: "limiter", reason: "full" },
-      sendAt: null,
+      preserveSchedule: false,
       recheckAt: null,
     });
     expect(requeued).toMatchObject({

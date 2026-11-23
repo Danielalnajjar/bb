@@ -263,6 +263,7 @@ export interface RecordQueuedMessageWaitArgs {
    * send is queued for the first time.
    */
   claimed: readonly ClaimedQueuedThreadMessageRow[] | null;
+  preserveSchedule: boolean;
 }
 
 /**
@@ -332,7 +333,7 @@ export function recordQueuedMessageWait(
       })),
       threadId: args.thread.id,
       waitingOn: args.waitingOn,
-      sendAt: args.sendAt,
+      preserveSchedule: args.preserveSchedule,
       recheckAt: args.recheckAt,
       onRequeued: (rows) => {
         for (const row of rows) {

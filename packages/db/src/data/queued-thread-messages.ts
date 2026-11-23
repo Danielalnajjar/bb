@@ -168,6 +168,12 @@ type QueuedMessageTransition =
       recheckAt: number | null;
       waitingOn: QueuedMessageWaitingOn;
     }
+  | {
+      event: "dispatch.requeued";
+      sendAt: number | null;
+      recheckAt: number | null;
+      waitingOn: QueuedMessageWaitingOn | null;
+    }
   | { event: "wait.cleared" }
   | { claimToken: string; event: "dispatch.claimed" }
   | { event: "claim.released" }
@@ -190,10 +196,14 @@ function queuedMessageTransitionPatch(
 ): Partial<QueuedMessageStateColumns> {
   switch (transition.event) {
     case "wait.recorded":
+    case "dispatch.requeued":
       return {
         claimedAt: null,
         claimToken: null,
-        waitingOn: JSON.stringify(transition.waitingOn),
+        waitingOn:
+          transition.waitingOn === null
+            ? null
+            : JSON.stringify(transition.waitingOn),
         waitHolder: waitHolderFor(transition.waitingOn),
         sendAt: transition.sendAt,
         recheckAt: transition.recheckAt,
@@ -1922,7 +1932,7 @@ export interface RequeueClaimedQueuedThreadMessagesArgs {
   claims: readonly ClaimedQueuedThreadMessageMutationArgs[];
   threadId: string;
   waitingOn: QueuedMessageWaitingOn;
-  sendAt: number | null;
+  preserveSchedule: boolean;
   recheckAt: number | null;
   onRequeued?: (rows: readonly QueuedThreadMessageRow[]) => void;
 }
@@ -1934,12 +1944,6 @@ export function requeueClaimedQueuedThreadMessages(
 ): QueuedThreadMessageRow | null {
   const lead = args.claims[0];
   if (lead === undefined) return null;
-  const transition: QueuedMessageTransition = {
-    event: "wait.recorded",
-    sendAt: args.sendAt,
-    recheckAt: args.recheckAt,
-    waitingOn: args.waitingOn,
-  };
   const { queuedLead, updatedRows } = db.transaction(
     (tx) => {
       const now = Date.now();
@@ -1951,7 +1955,26 @@ export function requeueClaimedQueuedThreadMessages(
         const ownsClaim = row.claimToken === claim.claimToken;
         if (!ownsClaim && (claim !== lead || isQueuedThreadMessageClaimed(row)))
           continue;
-        const updated = transitionQueuedMessage(tx, { now, row, transition });
+        const sendAt =
+          args.preserveSchedule &&
+          row.sendAt !== null &&
+          row.sendAt > now &&
+          (!ownsClaim || !hasTimeWait(row))
+            ? row.sendAt
+            : null;
+        const updated = transitionQueuedMessage(tx, {
+          now,
+          row,
+          transition: {
+            event: "dispatch.requeued",
+            sendAt,
+            recheckAt: args.recheckAt,
+            waitingOn:
+              sendAt === null && args.waitingOn.kind === "time"
+                ? null
+                : args.waitingOn,
+          },
+        });
         if (updated !== null) updatedRows.push(updated);
         if (claim === lead) queuedLead = updated;
       }
@@ -2244,9 +2267,9 @@ export function listQueuedThreadMessageCountsByThreadIds(
  * same value.
  */
 function waitHolderFor(
-  waitingOn: QueuedMessageWaitingOn,
+  waitingOn: QueuedMessageWaitingOn | null,
 ): QueuedMessageWaitHolder | null {
-  return waitingOn.kind === "plugin"
+  return waitingOn?.kind === "plugin"
     ? `${QUEUED_MESSAGE_PLUGIN_WAIT_HOLDER_PREFIX}${waitingOn.pluginId}`
     : null;
 }

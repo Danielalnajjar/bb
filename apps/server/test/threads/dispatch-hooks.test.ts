@@ -5,6 +5,7 @@ import {
   listQueuedThreadMessages,
   listQueuedThreadMessagesForApi,
   listRunningThreads,
+  migrate,
   setQueuedThreadMessageGroupBoundary,
 } from "@bb/db";
 import {
@@ -1816,6 +1817,176 @@ describe("a scheduled send held by a plugin wait", () => {
       });
     });
   }
+
+  it.each([
+    { timing: "before", offset: -1, how: "plugin-unregistered" },
+    { timing: "after", offset: 1, how: "recheck" },
+  ] as const)(
+    "honors a carry-era plugin-held deadline on release $timing the scheduled time",
+    async ({ offset, how }) => {
+      await withTestHarness(async (harness) => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        const { thread } = seedRunnableThread(harness, {
+          hostId: "host-legacy-plugin-schedule",
+          status: "idle",
+        });
+        const notBefore = Date.now() + SCHEDULED_IN_MS;
+        const recheckAt = notBefore + 60_000;
+        const input = textInput("legacy scheduled prompt");
+        await acceptThreadSendRequest(harness.deps, {
+          payload: { input, mode: "auto", sendAt: notBefore },
+          thread,
+        });
+        const row = onlyQueuedRow(harness, thread.id);
+        const sqlite = harness.db.$client;
+        const carryMigrationTimestamp = 1795025543077;
+        sqlite.exec(`
+          DROP INDEX queued_thread_messages_recheck_idx;
+          DROP INDEX threads_fork_history_copy_idx;
+          DROP INDEX threads_search_order_idx;
+          DROP INDEX environments_path_idx;
+          ALTER TABLE queued_thread_messages DROP COLUMN recheck_at;
+          ALTER TABLE hosts DROP COLUMN teardown_blocked_by_environment_id;
+          ALTER TABLE hosts ADD COLUMN suspend_retry_at INTEGER;
+          ALTER TABLE plugin_marketplaces DROP COLUMN enabled;
+          ALTER TABLE environments DROP COLUMN held_by;
+          ALTER TABLE environments DROP COLUMN create_pending;
+          DELETE FROM __drizzle_migrations WHERE created_at > ${carryMigrationTimestamp};
+        `);
+        sqlite
+          .prepare(`
+          UPDATE queued_thread_messages
+          SET state = 'scheduled', send_at = ?, wait_holder = 'plugin:limiter', waiting_on = ?
+          WHERE id = ?
+        `)
+          .run(
+            recheckAt,
+            JSON.stringify({
+              kind: "plugin",
+              pluginId: "limiter",
+              reason: "At capacity",
+              notBefore,
+            }),
+            row.id,
+          );
+
+        migrate(harness.db);
+        expect(getQueuedThreadMessage(harness.db, row.id)?.recheckAt).toBe(
+          recheckAt,
+        );
+        const turnsBefore = turnRequests(harness, thread.id).length;
+        vi.setSystemTime(notBefore + offset);
+        await release(harness, how, null);
+        if (offset < 0) {
+          expect(turnRequests(harness, thread.id)).toHaveLength(turnsBefore);
+          expect(onlyQueuedRow(harness, thread.id)).toMatchObject({
+            sendAt: notBefore,
+            waitingOn: { kind: "time" },
+          });
+
+          vi.setSystemTime(notBefore);
+          await runQueuedMessageDispatch(harness.deps, {
+            kind: "time-reached",
+            now: notBefore,
+          });
+        }
+
+        const requests = turnRequests(harness, thread.id);
+        expect(requests).toHaveLength(turnsBefore + 1);
+        expect(
+          turnRequestEventDataSchema.parse(JSON.parse(requests.at(-1)!.data))
+            .input,
+        ).toMatchObject(input);
+        expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([]);
+      });
+    },
+  );
+
+  it.each(["during a timed hold", "after capacity opens"] as const)(
+    "preserves each group member's schedule when the plugin rechecks %s before ungrouping",
+    async (timing) => {
+      await withTestHarness(async (harness) => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        const { thread } = seedRunnableThread(harness, {
+          hostId: "host-plugin-mixed-schedule",
+          status: "idle",
+        });
+        const sendAt = Date.now() + SCHEDULED_IN_MS;
+        const timedHold = timing === "during a timed hold";
+        const recheckAt = timedHold ? Date.now() + 60_000 : null;
+        let atCapacity = true;
+        installHooks({
+          "message.dispatch": [
+            {
+              pluginId: "limiter",
+              handler: () =>
+                atCapacity
+                  ? { action: "wait", reason: "At capacity", recheckAt }
+                  : { action: "proceed" },
+            },
+          ],
+        });
+        const unscheduledInput = textInput("not scheduled");
+        await acceptThreadSendRequest(harness.deps, {
+          payload: { input: unscheduledInput, mode: "auto" },
+          thread,
+        });
+        await acceptThreadSendRequest(harness.deps, {
+          payload: { input: textInput("scheduled"), mode: "auto", sendAt },
+          thread,
+        });
+        const [unscheduled, scheduled] = queuedRows(harness, thread.id);
+        if (unscheduled === undefined || scheduled === undefined)
+          throw new Error("Expected two held prompts");
+
+        const setBoundary = async (ids: string[], boundary: string) => {
+          const response = await harness.app.request(
+            `/api/v1/threads/${thread.id}/queued-messages/group-boundary`,
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                expectedGroupedPrefixQueuedMessageIds: ids,
+                groupBoundaryQueuedMessageId: boundary,
+              }),
+            },
+          );
+          expect(response.status).toBe(200);
+        };
+        await setBoundary([unscheduled.id, scheduled.id], scheduled.id);
+        const turnsBefore = turnRequests(harness, thread.id).length;
+
+        atCapacity = timedHold;
+        await release(
+          harness,
+          timedHold ? "recheck-due" : "recheck",
+          recheckAt,
+        );
+        expect(turnRequests(harness, thread.id)).toHaveLength(turnsBefore);
+
+        await setBoundary([unscheduled.id], unscheduled.id);
+        if (timedHold) {
+          await release(harness, "plugin-unregistered", null);
+        } else {
+          await runQueuedMessageDispatch(harness.deps, {
+            kind: "idle-recovery",
+            now: Date.now(),
+          });
+        }
+        const requests = turnRequests(harness, thread.id);
+        expect(requests).toHaveLength(turnsBefore + 1);
+        expect(
+          turnRequestEventDataSchema.parse(JSON.parse(requests.at(-1)!.data))
+            .input,
+        ).toMatchObject(unscheduledInput);
+        expect(onlyQueuedRow(harness, thread.id)).toMatchObject({
+          id: scheduled.id,
+          sendAt,
+          waitingOn: { kind: "time" },
+        });
+      });
+    },
+  );
 
   it("keeps the scheduled time across a re-attempt the plugin still holds", async () => {
     await withTestHarness(async (harness) => {

@@ -1067,7 +1067,7 @@ describe("queued thread messages", () => {
       claims: claimed!.map(({ id, claimToken }) => ({ id, claimToken })),
       threadId: thread.id,
       waitingOn: { kind: "plugin", pluginId: "limits", reason: "At capacity" },
-      sendAt: null,
+      preserveSchedule: false,
       recheckAt: null,
     });
 
@@ -1148,7 +1148,7 @@ describe("queued thread messages", () => {
       claims: claimed!.map(({ id, claimToken }) => ({ id, claimToken })),
       threadId: thread.id,
       waitingOn: { kind: "plugin", pluginId: "limits", reason: "At capacity" },
-      sendAt: null,
+      preserveSchedule: false,
       recheckAt: null,
     });
     clearQueuedThreadMessageWaitingOn(db, noopNotifier, {
@@ -1194,7 +1194,7 @@ describe("queued thread messages", () => {
       claims: claimed!.map(({ id, claimToken }) => ({ id, claimToken })),
       threadId: thread.id,
       waitingOn: { kind: "plugin", pluginId: "limits", reason: "At capacity" },
-      sendAt: null,
+      preserveSchedule: false,
       recheckAt: null,
       onRequeued,
     });

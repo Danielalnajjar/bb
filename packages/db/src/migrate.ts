@@ -1304,6 +1304,23 @@ function seedKeepAwakePluginConfiguration(db: DbConnection): void {
   `);
 }
 
+function restoreLegacyPluginHeldDeadlines(db: DbConnection): void {
+  db.$client.exec(`
+    UPDATE queued_thread_messages
+    SET send_at = json_extract(waiting_on, '$.notBefore'),
+        waiting_on = json_remove(waiting_on, '$.notBefore'),
+        state = CASE WHEN state = 'waiting' THEN 'scheduled' ELSE state END
+    WHERE send_at IS NULL
+      AND recheck_at IS NOT NULL
+      AND wait_holder GLOB 'plugin:*'
+      AND CASE WHEN json_valid(waiting_on) THEN
+        json_extract(waiting_on, '$.kind') = 'plugin'
+        AND json_type(waiting_on, '$.notBefore') = 'integer'
+        AND json_extract(waiting_on, '$.notBefore') >= 0
+      END
+  `);
+}
+
 function warnAboutFutureAppliedMigrations(
   db: DbConnection,
   options: MigrateOptions,
@@ -1469,4 +1486,5 @@ export function migrate(db: DbConnection, options: MigrateOptions = {}): void {
   warnAboutFutureAppliedMigrations(db, options);
   validateAppliedMigrationHistory(db, migrationsFolder);
   validatePendingInteractionsSchema(db);
+  restoreLegacyPluginHeldDeadlines(db);
 }

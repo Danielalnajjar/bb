@@ -524,6 +524,7 @@ async function runDispatchAttempt(
           : futureSendAt(payload.sendAt, sendNow),
       recheckAt,
       claimed,
+      preserveSchedule: !sendNow,
     });
     if (turnEndWait !== null && isTurnEndPluginHoldReady(deps, thread.id)) {
       requestQueuedMessageDispatch(deps, {
@@ -663,6 +664,7 @@ async function runDispatchAttempt(
       }
       const outcome = queueInputForStartingTurn(deps, {
         claimed,
+        preserveSchedule: !sendNow,
         input: queuedMessage,
         threadId: thread.id,
       });

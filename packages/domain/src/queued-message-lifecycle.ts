@@ -35,6 +35,7 @@ export type QueuedMessageLifecycleEventType =
   | "wait.recorded"
   | "wait.cleared"
   | "dispatch.claimed"
+  | "dispatch.requeued"
   | "claim.released"
   | "drain.failed";
 
@@ -53,10 +54,13 @@ const WAIT_RECORDED_TARGETS = [
   "scheduled",
 ] as const satisfies readonly QueuedMessageState[];
 
+const REQUEUED_TARGETS = ["queued", ...WAIT_RECORDED_TARGETS] as const;
+
 const UNFAILED_RESTING_TRANSITIONS = {
   "wait.recorded": WAIT_RECORDED_TARGETS,
   "wait.cleared": ["queued"],
   "dispatch.claimed": ["claimed"],
+  "dispatch.requeued": REQUEUED_TARGETS,
   "drain.failed": QUEUED_MESSAGE_FAILED_STATES,
 } as const satisfies Partial<
   Record<QueuedMessageLifecycleEventType, readonly QueuedMessageState[]>
@@ -76,16 +80,18 @@ export const QUEUED_MESSAGE_LIFECYCLE: Record<
     "wait.recorded": WAIT_RECORDED_TARGETS,
     "wait.cleared": ["failed_retrying"],
     "dispatch.claimed": ["claimed"],
+    "dispatch.requeued": REQUEUED_TARGETS,
     "drain.failed": QUEUED_MESSAGE_FAILED_STATES,
   },
   failed_exhausted: {
     "wait.recorded": WAIT_RECORDED_TARGETS,
     "wait.cleared": ["failed_exhausted"],
     "dispatch.claimed": ["claimed"],
+    "dispatch.requeued": REQUEUED_TARGETS,
     "drain.failed": QUEUED_MESSAGE_FAILED_STATES,
   },
   claimed: {
-    "wait.recorded": WAIT_RECORDED_TARGETS,
+    "dispatch.requeued": REQUEUED_TARGETS,
     "claim.released": RESTING_STATES,
   },
 };
