@@ -392,6 +392,7 @@ const OPTIONAL_SERVER_FIELD_GROUPS: readonly OptionalServerFieldGroup[] = [
       "createThreadRequestSchema.providerId",
       "createThreadRequestSchema.permissionMode",
       "createThreadRequestSchema.reasoningLevel",
+      "createThreadRequestSchema.codexAutoCompactTokenLimit",
       "createThreadRequestSchema.serviceTier",
       "createThreadRequestSchema.sessionOptions",
       "createThreadRequestSchema.sourceSeqEnd",
