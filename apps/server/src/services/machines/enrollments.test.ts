@@ -2,11 +2,18 @@ import { eq } from "drizzle-orm";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hosts } from "@bb/db";
+import { hasEnabledAuthApiKeyForHost, hosts } from "@bb/db";
 import { createMigratedConnection } from "@bb/db/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createMachineAuthService } from "../machine-auth.js";
-import { createMachineEnrollmentService } from "./enrollments.js";
+import {
+  createMachineAuthService,
+  DAEMON_ENROLL_CONFIG_ID,
+} from "../machine-auth.js";
+import {
+  createMachineEnrollmentService,
+  findUnusedEnrollmentCredential,
+} from "./enrollments.js";
+import { withHostCleanup } from "../hosts/cleanup-context.js";
 import { setPluginMachineProviderBridge } from "../plugins/plugin-machine-provider-registry.js";
 import { validatePluginMachineProviderDeclaration } from "@get-bb/plugin-sdk/internal/host-policy";
 
@@ -39,6 +46,16 @@ async function harness() {
         serverUrl: "https://server.example",
       }),
     ),
+    repair: vi.fn(
+      async (_request: {
+        key: string;
+        hostId: string;
+        signal: AbortSignal;
+      }) => ({
+        id: "repaired-grant",
+        serverUrl: "https://replacement.example",
+      }),
+    ),
   };
   const connected = new Set<string>();
   const deps = {
@@ -69,7 +86,10 @@ async function harness() {
     }),
     decisionTimeoutMs: 1_000,
   });
-  const seed = (key: string) => {
+  const seed = (
+    key: string,
+    state?: Pick<typeof hosts.$inferInsert, "phase" | "lastSeenAt">,
+  ) => {
     const now = Date.now();
     db.insert(hosts)
       .values({
@@ -82,6 +102,7 @@ async function harness() {
         phase: "creating",
         createdAt: now,
         updatedAt: now,
+        ...state,
       })
       .onConflictDoNothing()
       .run();
@@ -207,6 +228,140 @@ describe("machine enrollments", () => {
       hostId: first.hostId,
       state: "enrolled",
     });
+  });
+
+  it("repairs access and replaces the daemon key of a disconnected resuming host", async () => {
+    const h = await harness();
+    const key = "replacement";
+    const hostId = `host_${key}`;
+    h.seed(key, { phase: "resuming", lastSeenAt: Date.now() });
+    const oldHostKey = await h.machineAuth.issueDaemonHostKey({ hostId });
+    const oldEnrollment = await h.machineAuth.issueHostEnrollKey({
+      hostId,
+      enrollSource: "public-multi-machine",
+    });
+    expect(await h.machineAuth.verifyDaemonHostKey(oldHostKey)).not.toBeNull();
+
+    const enrollment = await h.api.prepare({
+      key,
+      signal: new AbortController().signal,
+      reEnroll: true,
+    });
+    if (enrollment.state !== "pending") throw new Error("Expected enrollment");
+    expect(enrollment.hostId).toBe(hostId);
+    expect(enrollment.bootstrap.serverUrl).toBe("https://replacement.example");
+    expect(h.serverAccess.repair).toHaveBeenCalledExactlyOnceWith({
+      key: JSON.stringify(["plugin-a", key]),
+      hostId,
+      signal: expect.any(AbortSignal),
+    });
+    expect(h.serverAccess.resolve).not.toHaveBeenCalled();
+    const { credential } = enrollment.bootstrap;
+    expect(credential).not.toBe(oldEnrollment.key);
+    expect(
+      await findUnusedEnrollmentCredential(h.db, oldEnrollment.key),
+    ).toBeNull();
+    expect(
+      await h.service.pendingBootstrapForHost({ hostId, owner: "plugin-a" }),
+    ).toBeNull();
+    expect(
+      await h.service.pendingBootstrapForCredential(credential),
+    ).toBeNull();
+
+    const redeemed = await h.machineAuth.enrollHost({
+      hostId,
+      token: credential,
+    });
+    if (!redeemed) throw new Error("Expected successful exchange");
+    expect(redeemed.hostKey).not.toBe(oldHostKey);
+    expect(
+      await h.machineAuth.verifyDaemonHostKey(redeemed.hostKey),
+    ).not.toBeNull();
+    expect(await h.machineAuth.verifyDaemonHostKey(oldHostKey)).toBeNull();
+  });
+
+  it.each([
+    { phase: "resuming", reEnroll: undefined, connected: false },
+    { phase: "resuming", reEnroll: true, connected: true },
+    { phase: "active", reEnroll: true, connected: false },
+    { phase: "suspended", reEnroll: true, connected: false },
+    { phase: "creating", reEnroll: true, connected: false },
+    { phase: "removing", reEnroll: true, connected: false },
+  ] as const)(
+    "does not mint for $phase (reEnroll: $reEnroll, connected: $connected)",
+    async ({ phase, reEnroll, connected }) => {
+      const h = await harness();
+      const key = "not-eligible";
+      const hostId = `host_${key}`;
+      h.seed(key, {
+        phase,
+        lastSeenAt: phase === "creating" ? null : Date.now(),
+      });
+      if (connected) h.connected.add(hostId);
+      const prepare = () =>
+        h.api.prepare({
+          key,
+          signal: new AbortController().signal,
+          ...(reEnroll === undefined ? {} : { reEnroll }),
+        });
+      if (phase === "removing")
+        await expect(prepare()).rejects.toThrow("cancelled");
+      const result = await withHostCleanup(
+        h,
+        phase === "removing" ? hostId : null,
+        prepare,
+      );
+      expect(result).toEqual({ id: hostId, hostId, state: "enrolled" });
+      expect(h.serverAccess.repair).not.toHaveBeenCalled();
+      expect(h.serverAccess.resolve).not.toHaveBeenCalled();
+      expect(
+        hasEnabledAuthApiKeyForHost(h.db, {
+          configId: DAEMON_ENROLL_CONFIG_ID,
+          hostId,
+        }),
+      ).toBe(false);
+    },
+  );
+
+  it("refuses explicit re-enrollment for unauthorized, cancelled, or invalid requests", async () => {
+    const h = await harness();
+    h.seed("resuming", { phase: "resuming", lastSeenAt: Date.now() });
+    h.seed("destroyed", { phase: "destroyed", lastSeenAt: Date.now() });
+    const request = { signal: new AbortController().signal, reEnroll: true };
+    await expect(
+      h.other.prepare({ ...request, key: "resuming" }),
+    ).rejects.toThrow("different plugin");
+    await expect(
+      h.api.prepare({ ...request, key: "destroyed" }),
+    ).rejects.toThrow("cancelled");
+    await expect(h.api.prepare({ ...request, key: " " })).rejects.toThrow(
+      "must not be empty",
+    );
+    await expect(
+      h.api.prepare({
+        ...request,
+        key: "resuming",
+        signal: AbortSignal.abort(new Error("aborted")),
+      }),
+    ).rejects.toThrow("aborted");
+    expect(h.serverAccess.repair).not.toHaveBeenCalled();
+    expect(h.serverAccess.resolve).not.toHaveBeenCalled();
+  });
+
+  it("only lets the owning plugin revoke an enrollment key", async () => {
+    const h = await harness();
+    h.seed("revoke", { phase: "resuming", lastSeenAt: Date.now() });
+    const hostId = "host_revoke";
+    const { key: token } = await h.machineAuth.issueHostEnrollKey({
+      hostId,
+      enrollSource: "public-multi-machine",
+    });
+    await h.other.revokeEnrollKeys?.("revoke");
+    expect(await findUnusedEnrollmentCredential(h.db, token)).toMatchObject({
+      hostId,
+    });
+    await h.api.revokeEnrollKeys?.("revoke");
+    expect(await findUnusedEnrollmentCredential(h.db, token)).toBeNull();
   });
 
   it("recovers access failures with the same durable host identity", async () => {

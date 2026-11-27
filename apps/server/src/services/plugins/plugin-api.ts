@@ -1351,6 +1351,10 @@ export function createPluginApi(options: {
       assertLive();
       return options.getMachineEnrollments().prepare(request);
     },
+    async revokeEnrollKeys(key) {
+      assertLive();
+      await options.getMachineEnrollments().revokeEnrollKeys?.(key);
+    },
     waitForConnection(request) {
       assertLive();
       return options.getMachineEnrollments().waitForConnection(request);

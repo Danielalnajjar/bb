@@ -42,7 +42,9 @@ export interface MachineEnrollments {
   prepare(request: {
     key: string;
     signal: AbortSignal;
+    reEnroll?: boolean;
   }): Promise<MachineEnrollment>;
+  revokeEnrollKeys?(key: string): Promise<void>;
   waitForConnection(request: {
     enrollmentId: string;
     timeoutMs: number;
@@ -55,6 +57,11 @@ interface EnrollmentServiceDependencies {
   machineAuth: MachineAuthService;
   serverAccess: {
     resolve(request: {
+      key: string;
+      hostId: string;
+      signal: AbortSignal;
+    }): Promise<ServerAccessGrant>;
+    repair?(request: {
       key: string;
       hostId: string;
       signal: AbortSignal;
@@ -146,18 +153,29 @@ export function createMachineEnrollmentService(
             getMachineProvider(host.machineProviderId ?? "")?.pluginId !== owner
           )
             throw new Error("Machine creation belongs to a different plugin");
-          if (host.lastSeenAt !== null || deps.isConnected(host.id)) {
+          const allowReEnroll =
+            request.reEnroll === true &&
+            host.phase === "resuming" &&
+            !deps.isConnected(host.id);
+          if (
+            deps.isConnected(host.id) ||
+            (!allowReEnroll &&
+              (host.lastSeenAt !== null || request.reEnroll === true))
+          ) {
             pending.delete(host.id);
             return { id: host.id, hostId: host.id, state: "enrolled" };
           }
-          const grant = await deps.serverAccess.resolve({
+          const accessRequest = {
             key: lockKey,
             hostId: host.id,
             signal: AbortSignal.any([
               request.signal,
               AbortSignal.timeout(60_000),
             ]),
-          });
+          };
+          const grant = await (allowReEnroll && deps.serverAccess.repair
+            ? deps.serverAccess.repair(accessRequest)
+            : deps.serverAccess.resolve(accessRequest));
           request.signal.throwIfAborted();
           await deps.machineAuth.revokeHostEnrollKeys({ hostId: host.id });
           const credential = await deps.machineAuth.issueHostEnrollKey({
@@ -183,12 +201,29 @@ export function createMachineEnrollmentService(
             await deps.machineAuth.revokeHostEnrollKeys({ hostId: host.id });
             request.signal.throwIfAborted();
           }
-          pending.set(host.id, {
-            owner,
-            launchKey: request.key,
-            bootstrap: result.bootstrap,
-          });
+          if (allowReEnroll) {
+            pending.delete(host.id);
+          } else {
+            pending.set(host.id, {
+              owner,
+              launchKey: request.key,
+              bootstrap: result.bootstrap,
+            });
+          }
           return result;
+        });
+      },
+      async revokeEnrollKeys(key) {
+        if (!key.trim()) return;
+        const lockKey = JSON.stringify([owner, key]);
+        await runSerialized(locks, lockKey, async () => {
+          const host = getNonDestroyedHostByLaunchKey(deps.db, key);
+          if (
+            !host ||
+            getMachineProvider(host.machineProviderId ?? "")?.pluginId !== owner
+          )
+            return;
+          await deps.machineAuth.revokeHostEnrollKeys({ hostId: host.id });
         });
       },
       async waitForConnection({ enrollmentId, timeoutMs, signal }) {
