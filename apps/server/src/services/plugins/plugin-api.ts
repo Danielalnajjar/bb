@@ -1344,7 +1344,6 @@ export function createPluginApi(options: {
 
   const enrollmentApi: MachineEnrollments = {
     clearPending(key) {
-      assertLive();
       options.getMachineEnrollments().clearPending(key);
     },
     prepare(request) {
@@ -1352,8 +1351,7 @@ export function createPluginApi(options: {
       return options.getMachineEnrollments().prepare(request);
     },
     async revokeEnrollKeys(key) {
-      assertLive();
-      await options.getMachineEnrollments().revokeEnrollKeys?.(key);
+      await options.getMachineEnrollments().revokeEnrollKeys(key);
     },
     waitForConnection(request) {
       assertLive();

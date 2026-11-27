@@ -147,8 +147,10 @@ export function createMachineBootstrapApi(
         });
         return { hostId: enrollment.hostId };
       } catch (error) {
-        enrollments.clearPending(request.key);
-        if (reEnrolled && enrollments.revokeEnrollKeys)
+        try {
+          enrollments.clearPending(request.key);
+        } catch {}
+        if (reEnrolled)
           await enrollments.revokeEnrollKeys(request.key).catch(() => {});
         throw error;
       }

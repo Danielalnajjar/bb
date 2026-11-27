@@ -25,9 +25,9 @@ function harness() {
       state: "pending",
       bootstrap,
     })),
-    revokeEnrollKeys: vi.fn<
-      NonNullable<MachineEnrollments["revokeEnrollKeys"]>
-    >(async () => {}),
+    revokeEnrollKeys: vi.fn<MachineEnrollments["revokeEnrollKeys"]>(
+      async () => {},
+    ),
     waitForConnection: vi.fn(async () => ({
       hostId: "host_1",
       hostName: "Host 1",
@@ -237,6 +237,22 @@ describe("machine bootstrap", () => {
       );
     },
   );
+
+  it("revokes the replacement key and preserves the failure when clearing pending throws", async () => {
+    const h = harness();
+    const failure = new Error("replacement connection failed");
+    h.enrollments.prepare.mockResolvedValueOnce(enrolled);
+    h.exec.mockImplementationOnce(startFailure(missingInstallation));
+    h.enrollments.waitForConnection.mockRejectedValueOnce(failure);
+    h.enrollments.clearPending.mockImplementationOnce(() => {
+      throw new Error("could not clear pending enrollment");
+    });
+
+    await expect(h.run()).rejects.toBe(failure);
+    expect(h.enrollments.revokeEnrollKeys).toHaveBeenCalledExactlyOnceWith(
+      "key",
+    );
+  });
 
   it("does no work after abort", async () => {
     const h = harness();
