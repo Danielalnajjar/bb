@@ -1,8 +1,10 @@
 import {
   claimQueuedThreadMessageGroup,
   getQueuedThreadMessage,
+  listQueuedThreadMessages,
   setQueuedThreadMessageFailureReason,
 } from "@bb/db";
+import { turnRequestEventDataSchema } from "@bb/domain";
 import type { PluginHookName } from "@get-bb/plugin-sdk";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../../src/errors.js";
@@ -10,11 +12,20 @@ import {
   setPluginHookProvider,
   type PluginHookRegistration,
 } from "../../src/services/plugins/plugin-hook-registry.js";
+import {
+  PERIODIC_SWEEP_JOBS,
+  runPeriodicSweepJobs,
+} from "../../src/services/system/periodic-sweeps.js";
 import { noteDispatchRequeued } from "../../src/services/threads/dispatch-hooks.js";
 import { QUEUED_MESSAGE_RETRY_DELAYS_MS } from "../../src/services/lib/persisted-retry.js";
+import { queueParentSystemMessage } from "../../src/services/threads/parent-system-messages.js";
 import { recordQueuedMessageDrainFailure } from "../../src/services/threads/queue-drain-failure.js";
 import { runQueuedMessageDispatch } from "../../src/services/threads/queued-message-dispatch.js";
 import { toThreadQueuedMessage } from "../../src/services/threads/thread-queued-messages.js";
+import {
+  listQueuedThreadCommands,
+  waitForQueuedCommand,
+} from "../helpers/commands.js";
 import { textInput } from "../helpers/prompt-input.js";
 import {
   seedEnvironment,
@@ -62,6 +73,155 @@ function seedQueuedRow(
     ...(args.sendAt === undefined ? {} : { sendAt: args.sendAt }),
   });
   return { host, thread, row };
+}
+
+const NOTICE_TEXT = "Child thread failed while M4 was away";
+
+function turnRequests(harness: TestAppHarness, threadId: string) {
+  return listEvents(harness.db, { threadId })
+    .filter((event) => event.type === "client/turn/requested")
+    .map((event) => turnRequestEventDataSchema.parse(JSON.parse(event.data)));
+}
+
+async function seedNoticeBlockedBySiblingClaim(harness: TestAppHarness) {
+  const host = seedHost(harness.deps, { name: "M4" });
+  const { project } = seedProjectWithSource(harness.deps, {
+    hostId: host.id,
+    path: WORKSPACE_PATH,
+  });
+  const environment = seedEnvironment(harness.deps, {
+    hostId: host.id,
+    projectId: project.id,
+    path: WORKSPACE_PATH,
+  });
+  const thread = seedThread(harness.deps, {
+    projectId: project.id,
+    environmentId: environment.id,
+  });
+  seedThreadRuntimeState(harness.deps, {
+    environmentId: environment.id,
+    providerThreadId: "returning-parent-thread",
+    threadId: thread.id,
+  });
+  const turnsBefore = turnRequests(harness, thread.id).length;
+  const control = seedQueuedRow(harness, {
+    hostConnected: false,
+    hostName: "M2",
+  });
+
+  expect(
+    await queueParentSystemMessage(harness.deps, {
+      input: textInput(NOTICE_TEXT),
+      parentThreadId: thread.id,
+      systemMessageKind: "child-failed",
+      systemMessageSubject: null,
+    }),
+  ).toBe(true);
+  await runQueuedMessageDispatch(harness.deps, {
+    kind: "thread-ready",
+    threadId: control.thread.id,
+  });
+  const [notice] = listQueuedThreadMessages(harness.db, thread.id);
+  if (notice === undefined) throw new Error("the notice was not queued");
+  for (const [row, hostName] of [
+    [notice, "M4"],
+    [control.row, "M2"],
+  ] as const) {
+    const parked = reread(harness, row.id);
+    expect(parked.waitingOn).toEqual({ kind: "host-offline", hostName });
+    expect(parked.sendAt).toBeNull();
+    expect(parked.failureReason).toBeNull();
+  }
+
+  const siblingSendAt = Date.now() + 60 * 60 * 1000;
+  const sibling = seedQueuedMessage(harness.deps, {
+    content: textInput("Send the sibling later"),
+    threadId: thread.id,
+    waitingOn: { kind: "time" },
+    sendAt: siblingSendAt,
+  });
+  const claimed = claimQueuedThreadMessageGroup(
+    harness.db,
+    harness.deps.hub,
+    sibling.id,
+    { kind: "explicit-send" },
+  );
+  expect(claimed?.map((row) => row.id)).toEqual([sibling.id]);
+  const siblingClaimToken = claimed![0]!.claimToken;
+
+  seedHostSession(harness.deps, { id: host.id, name: "M4" });
+  expect(harness.deps.hub.hasDaemonForHost(host.id)).toBe(true);
+  await runQueuedMessageDispatch(harness.deps, {
+    hostId: host.id,
+    kind: "host-connected",
+  });
+  expect(rereadRow(harness, sibling.id).claimToken).toBe(siblingClaimToken);
+  expect(reread(harness, notice.id).waitingOn).toEqual({
+    kind: "host-offline",
+    hostName: "M4",
+  });
+  expect(turnRequests(harness, thread.id)).toHaveLength(turnsBefore);
+
+  return {
+    control,
+    host,
+    notice,
+    sibling,
+    siblingSendAt,
+    thread,
+    turnsBefore,
+  };
+}
+
+async function expectTurnSubmittedTo(
+  harness: TestAppHarness,
+  args: { hostId: string; text: string; threadId: string },
+) {
+  const submitted = await waitForQueuedCommand(
+    harness,
+    (queued) =>
+      queued.command.type === "turn.submit" &&
+      queued.command.threadId === args.threadId,
+  );
+  expect(
+    listQueuedThreadCommands(harness, "turn.submit", args.threadId),
+  ).toHaveLength(1);
+  expect(submitted.row.hostId).toBe(args.hostId);
+  if (submitted.command.type !== "turn.submit") {
+    throw new Error("the captured command is not a turn submission");
+  }
+  expect(JSON.stringify(submitted.command.input)).toContain(args.text);
+}
+
+async function expectNoticeRecovered(
+  harness: TestAppHarness,
+  seeded: Awaited<ReturnType<typeof seedNoticeBlockedBySiblingClaim>>,
+) {
+  expect(getQueuedThreadMessage(harness.db, seeded.notice.id)).toBeNull();
+  await expectTurnSubmittedTo(harness, {
+    hostId: seeded.host.id,
+    text: NOTICE_TEXT,
+    threadId: seeded.thread.id,
+  });
+  expect(
+    listQueuedThreadCommands(harness, "turn.submit", seeded.control.thread.id),
+  ).toEqual([]);
+  const requests = turnRequests(harness, seeded.thread.id);
+  expect(requests).toHaveLength(seeded.turnsBefore + 1);
+  expect(requests.at(-1)!.initiator).toBe("system");
+  expect(JSON.stringify(requests.at(-1)!.input)).toContain(NOTICE_TEXT);
+  const sibling = rereadRow(harness, seeded.sibling.id);
+  expect(sibling.state).toBe("scheduled");
+  expect(sibling.claimToken).toBeNull();
+  expect(reread(harness, sibling.id).waitingOn).toEqual({ kind: "time" });
+  expect(sibling.sendAt).toBe(seeded.siblingSendAt);
+  const control = rereadRow(harness, seeded.control.row.id);
+  expect(reread(harness, control.id).waitingOn).toEqual({
+    kind: "host-offline",
+    hostName: "M2",
+  });
+  expect(control.sendAt).toBeNull();
+  expect(control.failureCount).toBe(0);
 }
 
 function rereadRow(harness: TestAppHarness, queuedMessageId: string) {
@@ -117,6 +277,97 @@ describe("host-connected queue dispatch", () => {
         kind: "host-offline",
         hostName: "M2",
       });
+    });
+  });
+
+  it("re-offers a parked row from idle recovery after the reconnect offer was refused", async () => {
+    await withTestHarness(async (harness) => {
+      const seeded = await seedNoticeBlockedBySiblingClaim(harness);
+      const recoveryAt = Date.now() + 6 * 60 * 1000;
+
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "idle-recovery",
+        now: recoveryAt,
+      });
+      await expectNoticeRecovered(harness, seeded);
+
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "idle-recovery",
+        now: recoveryAt,
+      });
+      expect(turnRequests(harness, seeded.thread.id)).toHaveLength(
+        seeded.turnsBefore + 1,
+      );
+      expect(turnRequests(harness, seeded.control.thread.id)).toEqual([]);
+
+      seedHostSession(harness.deps, {
+        id: seeded.control.host.id,
+        name: "M2",
+      });
+      seedThreadRuntimeState(harness.deps, {
+        environmentId: seeded.control.thread.environmentId,
+        providerThreadId: "returning-control-thread",
+        threadId: seeded.control.thread.id,
+      });
+      const controlTurnsBefore = turnRequests(
+        harness,
+        seeded.control.thread.id,
+      ).length;
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "idle-recovery",
+        now: recoveryAt,
+      });
+      expect(
+        getQueuedThreadMessage(harness.db, seeded.control.row.id),
+      ).toBeNull();
+      const controlRequests = turnRequests(harness, seeded.control.thread.id);
+      expect(controlRequests).toHaveLength(controlTurnsBefore + 1);
+      expect(JSON.stringify(controlRequests.at(-1)!.input)).toContain(
+        "Capture the Safari trace",
+      );
+      await expectTurnSubmittedTo(harness, {
+        hostId: seeded.control.host.id,
+        text: "Capture the Safari trace",
+        threadId: seeded.control.thread.id,
+      });
+
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "idle-recovery",
+        now: recoveryAt,
+      });
+      expect(turnRequests(harness, seeded.thread.id)).toHaveLength(
+        seeded.turnsBefore + 1,
+      );
+      expect(turnRequests(harness, seeded.control.thread.id)).toHaveLength(
+        controlTurnsBefore + 1,
+      );
+    });
+  });
+
+  it("re-offers a parked row from the periodic queue sweep jobs", async () => {
+    await withTestHarness(async (harness) => {
+      const seeded = await seedNoticeBlockedBySiblingClaim(harness);
+      const jobs = PERIODIC_SWEEP_JOBS.filter(
+        (job) =>
+          job.name === "queued-message-claim-release" ||
+          job.name === "queued-message-auto-send",
+      );
+      expect(jobs.map((job) => job.name)).toEqual([
+        "queued-message-claim-release",
+        "queued-message-auto-send",
+      ]);
+
+      await runPeriodicSweepJobs(
+        {
+          ...harness.deps,
+          pluginSchedules: harness.pluginService,
+          plugins: harness.pluginService,
+        },
+        jobs,
+        Date.now() + 6 * 60 * 1000,
+      );
+
+      await expectNoticeRecovered(harness, seeded);
     });
   });
 });

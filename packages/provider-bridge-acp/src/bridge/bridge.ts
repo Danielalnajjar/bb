@@ -15,7 +15,11 @@ import type {
   SessionOptionSelections,
   ThreadSessionOption,
 } from "@bb/domain";
-import { acpLaunchSpecSchema, type AcpLaunchSpec } from "../launch-spec.js";
+import {
+  acpLaunchSpecSchema,
+  hostConfiguredAcpCommand,
+  type AcpLaunchSpec,
+} from "../launch-spec.js";
 import {
   BRIDGE_INBOUND_REQUEST_METHODS,
   BRIDGE_JSON_RPC_ERRORS,
@@ -81,6 +85,7 @@ import {
 } from "../delta-translation.js";
 import {
   compactionOutcomeForEndTurn,
+  CURSOR_ACP_DIALECT,
   grokContextUsageFromPromptResult,
   grokContextWindowSizeFromSessionModels,
   resolveAcpDialect,
@@ -2565,6 +2570,7 @@ async function startAgentSession(
     if (mcpServer) {
       session.cursorMcpApproval = await approveCursorSessionMcpServer({
         agentCommand: params.agent.command,
+        cursorDialect: dialect.id === CURSOR_ACP_DIALECT.id,
         config: mcpServer,
         cwd: params.cwd,
         env: childEnv,
@@ -3999,13 +4005,26 @@ async function handleModelList(
   });
 }
 
-function decodeLaunchSpec(
+function parseLaunchSpec(
   providerOptions: Record<string, unknown> | undefined,
 ): AcpLaunchSpec | null {
   const launchSpec = acpLaunchSpecSchema.safeParse(
     providerOptions?.["acpLaunchSpec"],
   );
   return launchSpec.success ? launchSpec.data : null;
+}
+
+function decodeLaunchSpec(
+  providerOptions: Record<string, unknown> | undefined,
+): AcpLaunchSpec | null {
+  const launchSpec = parseLaunchSpec(providerOptions);
+  if (launchSpec === null) {
+    return null;
+  }
+  const configured = hostConfiguredAcpCommand(launchSpec, process.env);
+  return configured === null
+    ? launchSpec
+    : { ...launchSpec, command: configured };
 }
 
 const acpProviderOptionsSchema = z
@@ -4055,17 +4074,23 @@ function maintenanceTarget(
 ): {
   maintenance: AcpMaintenanceDialect | undefined;
   command: string | null;
+  executableConfigured: boolean;
   dialectId: string;
   env: NodeJS.ProcessEnv;
 } {
-  const launchSpec = decodeLaunchSpec(providerOptions);
+  const launchSpec = parseLaunchSpec(providerOptions);
+  const configured =
+    launchSpec === null
+      ? null
+      : hostConfiguredAcpCommand(launchSpec, process.env);
   const dialect = resolveAcpDialect({
     dialectId: decodeDialectId(providerOptions),
     command: launchSpec?.command ?? "",
   });
   return {
-    maintenance: dialect.maintenance,
-    command: launchSpec?.command ?? null,
+    maintenance: configured === null ? dialect.maintenance : undefined,
+    command: configured ?? launchSpec?.command ?? null,
+    executableConfigured: configured !== null,
     dialectId: dialect.id,
     env: buildProviderCliEnv({ ...launchSpec?.env, ...envVars }),
   };

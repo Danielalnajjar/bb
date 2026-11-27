@@ -187,12 +187,13 @@ async function mutateApprovals(
 
 export async function approveCursorSessionMcpServer(args: {
   agentCommand: string;
+  cursorDialect: boolean;
   config: AcpMcpServerConfig;
   cwd: string;
   env: Readonly<Record<string, string | undefined>>;
 }): Promise<CursorMcpApproval | undefined> {
   if (
-    !cursorAgentCommand(args.agentCommand) ||
+    !(args.cursorDialect || cursorAgentCommand(args.agentCommand)) ||
     args.config.name !== ACP_BRIDGE_MCP_SERVER_NAME
   ) {
     return undefined;

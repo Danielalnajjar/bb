@@ -1,7 +1,9 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   exceedsPluginMetadataLimit,
   parsePersistedPluginMetadata,
+  RESTART_RESUME_METADATA_KEY,
+  restartResumeMetadataSchema,
   type JsonObject,
 } from "@bb/domain";
 import type {
@@ -10,6 +12,8 @@ import type {
   DbTransaction,
 } from "../connection.js";
 import { threadPluginMetadata } from "../schema.js";
+
+const threadExecutionNamespace = "@bb/thread-execution";
 
 export interface ThreadPluginMetadataPatch {
   threadId: string;
@@ -49,6 +53,75 @@ export function getThreadPluginMetadata(
   return metadata === undefined
     ? { metadata: {}, corrupt: true }
     : { metadata, corrupt: false };
+}
+
+export function getThreadCodexAutoCompactTokenLimit(
+  db: DbQueryConnection,
+  threadId: string,
+): number | undefined {
+  const { metadata } = getThreadPluginMetadata(
+    db,
+    threadId,
+    threadExecutionNamespace,
+  );
+  const limit = metadata.codexAutoCompactTokenLimit;
+  return typeof limit === "number" ? limit : undefined;
+}
+
+export function insertThreadCodexAutoCompactTokenLimit(
+  db: DbTransaction,
+  threadId: string,
+  limit: number,
+): void {
+  insertThreadPluginMetadata(db, {
+    threadId,
+    pluginId: threadExecutionNamespace,
+    metadata: { codexAutoCompactTokenLimit: limit },
+  });
+}
+
+export function readRestartResumeFacts(
+  db: DbQueryConnection,
+  threadId: string,
+  onInvalid?: (pluginId: string) => void,
+): {
+  hold: { pluginId: string; reason: string | null } | null;
+  receiptBacked: boolean;
+} {
+  const metadata = threadPluginMetadata.metadataJson;
+  const path = `$.${RESTART_RESUME_METADATA_KEY}`;
+  const rows = db
+    .select({
+      pluginId: threadPluginMetadata.pluginId,
+      value: sql<string | null>`case when json_valid(${metadata}) then
+        case when json_type(${metadata}, ${path}) = 'object' then json_extract(${metadata}, ${path}) end
+      end`,
+    })
+    .from(threadPluginMetadata)
+    .where(
+      and(
+        eq(threadPluginMetadata.threadId, threadId),
+        sql`case when json_valid(${metadata}) then json_type(${metadata}, ${path}) is not null else 1 end`,
+      ),
+    )
+    .all();
+
+  let hold: { pluginId: string; reason: string | null } | null = null;
+  let receiptBacked = false;
+  for (const { pluginId, value } of rows) {
+    const parsed = restartResumeMetadataSchema.safeParse(
+      value === null ? undefined : JSON.parse(value),
+    );
+    if (!parsed.success) {
+      onInvalid?.(pluginId);
+      continue;
+    }
+    if (parsed.data.hold && hold === null) {
+      hold = { pluginId, reason: parsed.data.reason ?? null };
+    }
+    receiptBacked ||= parsed.data.receiptBacked === true;
+  }
+  return { hold, receiptBacked };
 }
 
 export function listThreadPluginMetadataRows(
@@ -121,7 +194,7 @@ export function insertThreadPluginMetadata(
 }
 
 export function patchThreadPluginMetadata(
-  db: DbConnection,
+  db: DbQueryConnection,
   input: ThreadPluginMetadataPatch,
 ): ThreadPluginMetadataPatchResult {
   return db.transaction(

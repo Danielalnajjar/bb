@@ -601,7 +601,7 @@ function advanceThreadPruningTransaction(
     result.threadId !== null &&
     !TIMELINE_PRESERVING_POLICIES.has(policy)
   )
-    bumpThreadEventRewriteGeneration(db, result.threadId);
+    bumpThreadEventRewriteGeneration(result.threadId);
   return result;
 }
 

@@ -5,6 +5,7 @@ import {
   readLastServerMoveFile,
   readServerConnectHoldFile,
   writeServerConnectHoldFile,
+  writeServerMovedFile,
 } from "@bb/server-archive";
 import { describe, expect, it } from "vitest";
 import { createDeferredPromise, hasExited } from "@bb/test-helpers";
@@ -45,6 +46,21 @@ async function prepareMove(
   const command = await prepareCommand(fixture, overrides);
   const prepared = await fixture.service.prepare(command);
   return { command, prepared };
+}
+
+async function writePreviousMove(fixture: Fixture): Promise<void> {
+  await writeServerMovedFile(fixture.dataDir, {
+    version: 1,
+    moveId: "previous-move",
+    movedAt: 1_700_000_000_000,
+    fromHostId: "host-target",
+    toHostId: "host-source",
+    toHostName: "laptop",
+    serverUrl: "http://old-server:38886",
+    mode: "direct",
+    connectHandle: null,
+    oldCopyEntries: [],
+  });
 }
 
 async function expectMarkersRemoved(fixture: Fixture): Promise<void> {
@@ -106,6 +122,7 @@ describe("server_move.activate pre-validation", () => {
       const fixture = await createFixture(fixtureArgs);
       const { prepared } = await prepareMove(fixture);
       await setup(fixture);
+      await writePreviousMove(fixture);
 
       await expect(
         fixture.service.activate(activateCommand),
@@ -121,6 +138,9 @@ describe("server_move.activate pre-validation", () => {
         true,
       );
       expect(hasExited(fixture.pendingServer(prepared.pid))).toBe(false);
+      expect(await exists(join(fixture.dataDir, "server-moved.json"))).toBe(
+        true,
+      );
       expect(fixture.shutdownRequests).toEqual([]);
     },
   );
@@ -139,6 +159,51 @@ describe("server_move.activate pre-validation", () => {
 });
 
 describe("server_move.activate sequencing", () => {
+  it.each(["service", "replacement"] as const)(
+    "clears the previous move before starting the returned server through %s",
+    async (plan) => {
+      const fixture = await createFixture({ env: {} });
+      if (plan === "service") {
+        await writeSystemdUnit({
+          homeDir: fixture.homeDir,
+          dataDir: fixture.dataDir,
+          execStart: DAEMON_ONLY_EXEC_START,
+        });
+      }
+      const markerAtStart: boolean[] = [];
+      const service = fixture.createService({
+        runCommand: async (_command, args) => {
+          if (args.includes("restart")) {
+            markerAtStart.push(
+              await exists(join(fixture.dataDir, "server-moved.json")),
+            );
+          }
+        },
+        spawnDetached: async () => {
+          markerAtStart.push(
+            await exists(join(fixture.dataDir, "server-moved.json")),
+          );
+          return 999_999;
+        },
+      });
+      await writePreviousMove(fixture);
+      await service.prepare(await prepareCommand(fixture));
+      expect(await exists(join(fixture.dataDir, "server-moved.json"))).toBe(
+        true,
+      );
+
+      await service.activate(activateCommand);
+      await service.resumeActivation();
+
+      expect(markerAtStart).toEqual([false]);
+      expect(await exists(join(fixture.dataDir, "server-moved.json"))).toBe(
+        false,
+      );
+      await expectMarkersRemoved(fixture);
+      expect(await exists(join(fixture.dataDir, "bb.db"))).toBe(true);
+    },
+  );
+
   it("persists the activation, waits for the old session to close, swaps the unit, and removes markers after the swap", async () => {
     const fixture = await createFixture({ env: {} });
     const unitPath = await writeSystemdUnit({
@@ -389,11 +454,13 @@ describe("server_move.activate sequencing", () => {
       },
     });
     await prepareMove(fixture);
+    await writePreviousMove(fixture);
 
     await fixture.service.activate(activateCommand);
     await fixture.service.resumeActivation();
 
     expect(checks).toBeGreaterThan(0);
+    expect(await exists(join(fixture.dataDir, "server-moved.json"))).toBe(true);
     expect(fixture.shutdownRequests).toEqual([
       ["server-move-activation-port-busy", 1],
     ]);
@@ -435,34 +502,43 @@ describe("activation resume", () => {
     });
   });
 
-  it("only drops the activation record when this daemon already runs next to the activated server", async () => {
-    const fixture = await createFixture();
-    const serverPort = 39_123;
-    await writeIncomingMoveState(fixture.dataDir, {
-      version: 1,
-      moveId: MOVE_ID,
-      activationToken: "activation-token-0123456789",
-      serverPort,
-      bindHost: null,
-      importedEntries: ["bb.db"],
-      archivedServerData: null,
-      pendingServer: { pid: 999_998, localServerUrl: "http://127.0.0.1:1" },
-      preparedAt: 1,
-      activation: { lastMove, plan: "service", requestedAt: 1 },
-    });
-    const colocated = fixture.createService({
-      serverUrl: `http://127.0.0.1:${serverPort}`,
-    });
+  it.each([false, true])(
+    "finishes colocated activation without restarting when a previous moved marker exists: %s",
+    async (previousMove) => {
+      const fixture = await createFixture();
+      const serverPort = 39_123;
+      await writeIncomingMoveState(fixture.dataDir, {
+        version: 1,
+        moveId: MOVE_ID,
+        activationToken: "activation-token-0123456789",
+        serverPort,
+        bindHost: null,
+        importedEntries: ["bb.db"],
+        archivedServerData: null,
+        pendingServer: { pid: 999_998, localServerUrl: "http://127.0.0.1:1" },
+        preparedAt: 1,
+        activation: { lastMove, plan: "service", requestedAt: 1 },
+      });
+      if (previousMove) {
+        await writePreviousMove(fixture);
+      }
+      const colocated = fixture.createService({
+        serverUrl: `http://127.0.0.1:${serverPort}`,
+      });
 
-    await colocated.resumeActivation();
+      await colocated.resumeActivation();
 
-    expect(await exists(join(fixture.dataDir, "server-move-incoming"))).toBe(
-      false,
-    );
-    expect(fixture.commands).toEqual([]);
-    expect(fixture.shutdownRequests).toEqual([]);
-    expect(fixture.detachedRequests).toEqual([]);
-  });
+      expect(await exists(join(fixture.dataDir, "server-moved.json"))).toBe(
+        false,
+      );
+      expect(await exists(join(fixture.dataDir, "server-move-incoming"))).toBe(
+        false,
+      );
+      expect(fixture.commands).toEqual([]);
+      expect(fixture.shutdownRequests).toEqual([]);
+      expect(fixture.detachedRequests).toEqual([]);
+    },
+  );
 });
 
 describe("server move redirects during a move", () => {

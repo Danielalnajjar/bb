@@ -1,6 +1,7 @@
 import pRetry, { AbortError } from "p-retry";
 import { z } from "zod";
 import {
+  HOST_DAEMON_EVENT_IDS_HEADER,
   HOST_DAEMON_PROTOCOL_VERSION,
   SERVER_MOVED_ERROR_CODE,
   serverMovedErrorDetailsSchema,
@@ -177,6 +178,14 @@ function toRetryControlError(error: ServerResponseError): Error {
   return error.retryable ? error : new AbortError(error);
 }
 
+function isRequestValidationRejection(error: unknown): boolean {
+  return (
+    error instanceof ServerResponseError &&
+    error.status === 400 &&
+    error.code === "invalid_request"
+  );
+}
+
 export type FetchFn = (
   ...args: Parameters<typeof fetch>
 ) => ReturnType<typeof fetch>;
@@ -324,6 +333,7 @@ export function createServerClient(
   options: CreateServerClientOptions,
 ): ServerClient {
   const fetchFn = options.fetchFn ?? fetch;
+  let eventIdsAccepted = true;
 
   function requireSessionId(): string {
     const sessionId = options.getSessionId();
@@ -373,6 +383,27 @@ export function createServerClient(
     });
   }
 
+  async function sendEventBatch(
+    payload: HostDaemonEventBatchRequest,
+  ): Promise<EventPostResult> {
+    const response = await fetchFn(buildInternalUrl("/session/events"), {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      throw await createResponseError("post events", response);
+    }
+
+    const json = await response.json();
+    const parsed = hostDaemonEventBatchResponseSchema.parse(json);
+    return {
+      acceptedEvents: parsed.acceptedEvents,
+      rejectedEvents: parsed.rejectedEvents,
+    };
+  }
+
   return {
     async openSession(
       args: OpenSessionArgs,
@@ -404,7 +435,12 @@ export function createServerClient(
         throw await createResponseError("open session", response);
       }
 
-      return hostDaemonSessionOpenResponseSchema.parse(await response.json());
+      const opened = hostDaemonSessionOpenResponseSchema.parse(
+        await response.json(),
+      );
+      eventIdsAccepted =
+        response.headers.get(HOST_DAEMON_EVENT_IDS_HEADER) === "1";
+      return opened;
     },
 
     async fetchProjectAttachment(
@@ -506,26 +542,26 @@ export function createServerClient(
     async postEvents(
       events: HostDaemonEventEnvelope[],
     ): Promise<EventPostResult> {
-      const payload: HostDaemonEventBatchRequest = {
-        sessionId: requireSessionId(),
-        eventGroups: groupHostDaemonEvents(events),
-      };
-      const response = await fetchFn(buildInternalUrl("/session/events"), {
-        method: "POST",
-        headers: headers(),
-        body: JSON.stringify(payload),
+      const sessionId = requireSessionId();
+      const eventGroups = groupHostDaemonEvents(events, {
+        includeEventIds: eventIdsAccepted,
       });
-
-      if (!response.ok) {
-        throw await createResponseError("post events", response);
+      try {
+        return await sendEventBatch({ sessionId, eventGroups });
+      } catch (error) {
+        if (
+          !isRequestValidationRejection(error) ||
+          !eventGroups.some((group) => group.eventIds !== undefined)
+        ) {
+          throw error;
+        }
       }
-
-      const json = await response.json();
-      const parsed = hostDaemonEventBatchResponseSchema.parse(json);
-      return {
-        acceptedEvents: parsed.acceptedEvents,
-        rejectedEvents: parsed.rejectedEvents,
-      };
+      const result = await sendEventBatch({
+        sessionId,
+        eventGroups: groupHostDaemonEvents(events),
+      });
+      eventIdsAccepted = false;
+      return result;
     },
 
     async callTool(

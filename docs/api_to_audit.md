@@ -14,6 +14,24 @@ question.
 [provider-bridge-protocol.md](provider-bridge-protocol.md). An entry without
 a "Docs:" line has no owning doc, so it keeps the essential contract itself.
 
+## Restart resume (thread plugin metadata)
+
+`experimental_restartResume` is a key in a plugin's thread metadata, written
+by Crew through `bb.sdk.threads.updatePluginMetadata`. Its value is
+`{ hold: boolean, reason?: string, receiptBacked?: boolean }`. A reason, when
+present, is 1–200 characters. Core reads all plugin namespaces with
+`readRestartResumeFacts`; any valid hold blocks native restart planning and
+automatic admission for an existing restart retry. Invalid records are
+ignored. Explicit Send now overrides the hold. A PATCH that clears the last
+hold wakes due dispatch on that thread and reoffers its waiting restart retry
+once when it is not dated in the future, without changing the row's wait or
+schedule. Any valid `receiptBacked: true` adds a receipt check to the restart
+continuation.
+
+Before stabilization, verify the paired Crew upgrade and pause/unpause
+lifecycle, and audit namespace ownership, retry identity and clear-to-dispatch
+behavior with multiple holders.
+
 ## Host paths (`@get-bb/plugin-sdk`)
 
 `experimental_normalizeHostPath(path)`,
@@ -1249,7 +1267,10 @@ the agent named by `providerOptions.acpLaunchSpec` with the dialect named by
 agent for its `agentCapabilities`, and `experimental_acpAgentProbeSchema`
 validates the answer across a host RPC boundary.
 `experimental_acpLaunchSpecSchema` / `AcpLaunchSpec` is the launch spec the
-bridge parses.
+bridge parses. Its optional `commandEnv` names a host environment variable
+that, when set to a non-blank value, replaces `command` on that host for every
+launch, model listing and readiness check; the declaration lists the same name
+in `env.passthrough` so the daemon forwards it.
 
 `experimental_registerAcpDialect` adds a dialect. A plugin calls it at module
 load in its `bb.host` artifact with an `AcpDialect` and names the id as

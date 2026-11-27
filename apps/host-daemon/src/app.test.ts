@@ -60,6 +60,7 @@ interface FetchRecorder {
 }
 
 interface CreateFetchRecorderArgs {
+  connectLabelResponse?: (url: URL) => Response;
   machineEnvironment?: HostDaemonContributedEnvEntry[];
   onToolCallSignal?: (signal: AbortSignal | null | undefined) => void;
   inactiveSessionOnFirstEventPost?: boolean;
@@ -134,6 +135,12 @@ function createFetchRecorder(
     };
     requests.push(request);
 
+    if (
+      url.pathname === "/api/connect/machine-label" &&
+      args.connectLabelResponse
+    ) {
+      return args.connectLabelResponse(url);
+    }
     if (url.pathname === "/internal/session/tool-call")
       args.onToolCallSignal?.(init?.signal);
     if (url.pathname === "/internal/session/open") {
@@ -404,12 +411,16 @@ async function settleReaperPromiseChain(): Promise<void> {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 async function createAppFixture(
   args: CreateFetchRecorderArgs = {},
   options: {
     closeMachineAuthProxy?: () => Promise<void>;
+    connectOrigin?: string;
+    serverUrl?: string;
+    serverHeaders?: Record<string, string>;
     createWebSocket?: CreateReconnectingWebSocket;
     exitProcess?: (code: number) => void;
     savedAgentCpuPriority?: boolean;
@@ -424,7 +435,9 @@ async function createAppFixture(
   const runtimeOptions: RuntimeOptionsRef = { current: null };
   const app = await createHostDaemonApp({
     dataDir,
-    serverUrl: "http://127.0.0.1:3334",
+    serverUrl: options.serverUrl ?? "http://127.0.0.1:3334",
+    connectOrigin: options.connectOrigin,
+    serverHeaders: options.serverHeaders,
     hostKey: "host-key-app-test",
     hostId: "host-app-test",
     hostName: "App Test Host",
@@ -454,6 +467,50 @@ async function createAppFixture(
 }
 
 describe("createHostDaemonApp", () => {
+  it("keeps Connect credentials on the local origin despite server-provided destinations", async () => {
+    vi.stubEnv("BB_CONNECT_ORIGIN", "https://ambient.getbb.app");
+    const requests: string[] = [];
+    const { app } = await createAppFixture(
+      {
+        machineEnvironment: [
+          {
+            name: "BB_CONNECT_ORIGIN",
+            value: "https://server-supplied.invalid",
+            source: { core: "machine-environment" },
+            reason: "untrusted server destination",
+          },
+        ],
+        connectLabelResponse: (url) => {
+          requests.push(url.origin);
+          return Response.json({
+            label: "test-machine",
+            baseDomain: "server-supplied.invalid",
+            apiOrigin: "https://server-supplied.invalid",
+          });
+        },
+      },
+      {
+        serverUrl: "https://bb-vm.tail.test:444",
+        connectOrigin: "https://owner.getbb.app",
+        serverHeaders: { "x-bb-connect-machine": "test-machine-credential" },
+      },
+    );
+    try {
+      await app.daemon.start();
+      expect(process.env.BB_CONNECT_ORIGIN).toBe(
+        "https://server-supplied.invalid",
+      );
+      await expect(app.connectTunnel.ensureTunnelIdentity()).resolves.toEqual({
+        label: "test-machine",
+        baseDomain: "getbb.app",
+      });
+      expect(requests).toEqual(["https://owner.getbb.app"]);
+    } finally {
+      await app.daemon.shutdown("test-complete", 0);
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("installs machine variables into the daemon and child processes before work, then removes overrides live", async () => {
     vi.stubEnv("MACHINE_DAEMON_TEST", "original");
     let socket: ReconnectingWebSocketLike | undefined;

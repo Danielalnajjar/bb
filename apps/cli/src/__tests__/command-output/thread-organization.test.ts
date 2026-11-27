@@ -355,6 +355,46 @@ describe("bb thread organization commands", () => {
     },
   );
 
+  it("hides stale waits, failures, countdowns, and retry commands for claimed rows", async () => {
+    const sendAt = Date.now() + 60_000;
+    const waitingOn = {
+      kind: "host-offline",
+      hostName: "Offline host",
+    } as const;
+    const list = vi.fn(async () => [
+      queuedMessage({
+        id: "claimed-wait",
+        state: "claimed",
+        editable: false,
+        waitingOn,
+        sendAt,
+      }),
+      queuedMessage({
+        id: "claimed-failure",
+        state: "claimed",
+        editable: false,
+        waitingOn,
+        sendAt,
+        failureReason: "The previous attempt failed",
+      }),
+    ]);
+    stubServerApi({ "v1.queued-messages.$get": list });
+
+    await runCommand(["thread", "queue", "list"], register);
+
+    const output = vi
+      .mocked(console.log)
+      .mock.calls.map((args) => args.join(" "))
+      .join("\n");
+    expect(output).not.toContain("Failed");
+    expect(output).not.toContain("Retry: bb thread queue send");
+    for (const id of ["claimed-wait", "claimed-failure"]) {
+      expect(output.split("\n").find((line) => line.includes(id))).toMatch(
+        /\bclaimed\s*$/u,
+      );
+    }
+  });
+
   it("updates a queued message in place", async () => {
     const list = vi.fn(async () => [
       { id: "queued-1", updatedAt: 42 },
@@ -411,32 +451,29 @@ describe("bb thread organization commands", () => {
       sendAt: Date.parse("2026-10-30T12:00:00Z") + 2 * 3_600_000,
     },
     { flags: ["--clear-send-at"], sendAt: null },
-  ])(
-    "changes only the send time with $flags",
-    async ({ flags, sendAt }) => {
-      vi.useFakeTimers({ now: Date.parse("2026-10-30T12:00:00Z") });
-      try {
-        const list = vi.fn(async () => [{ id: "queued-1", updatedAt: 42 }]);
-        const update = vi.fn(async () => ({ id: "queued-1", sendAt }));
-        stubServerApi({
-          "v1.threads.:id.queued-messages.$get": list,
-          "v1.threads.:id.queued-messages.:queuedMessageId.$patch": update,
-        });
+  ])("changes only the send time with $flags", async ({ flags, sendAt }) => {
+    vi.useFakeTimers({ now: Date.parse("2026-10-30T12:00:00Z") });
+    try {
+      const list = vi.fn(async () => [{ id: "queued-1", updatedAt: 42 }]);
+      const update = vi.fn(async () => ({ id: "queued-1", sendAt }));
+      stubServerApi({
+        "v1.threads.:id.queued-messages.$get": list,
+        "v1.threads.:id.queued-messages.:queuedMessageId.$patch": update,
+      });
 
-        await runCommand(
-          ["thread", "queue", "update", "thread-1", "queued-1", ...flags],
-          register,
-        );
+      await runCommand(
+        ["thread", "queue", "update", "thread-1", "queued-1", ...flags],
+        register,
+      );
 
-        expect(update).toHaveBeenCalledWith({
-          param: { id: "thread-1", queuedMessageId: "queued-1" },
-          json: { expectedUpdatedAt: 42, sendAt },
-        });
-      } finally {
-        vi.useRealTimers();
-      }
-    },
-  );
+      expect(update).toHaveBeenCalledWith({
+        param: { id: "thread-1", queuedMessageId: "queued-1" },
+        json: { expectedUpdatedAt: 42, sendAt },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("changes only the execution options, mapping workspace-write to accept-edits", async () => {
     const list = vi.fn(async () => [{ id: "queued-1", updatedAt: 42 }]);
@@ -517,6 +554,59 @@ describe("bb thread organization commands", () => {
       "Error: Queued message queued-1 not found on thread thread-1.",
     );
     expect(update).not.toHaveBeenCalled();
+  });
+
+  it("refuses to update a claimed row without uploading its attachment", async () => {
+    const list = vi.fn(async () => [
+      queuedMessage({ state: "claimed", editable: false }),
+    ]);
+    const update = vi.fn(async () => queuedMessage({}));
+    stubServerApi({
+      "v1.threads.:id.queued-messages.$get": list,
+      "v1.threads.:id.$get": async () => ({ projectId: "remote-project" }),
+      "v1.threads.:id.queued-messages.:queuedMessageId.$patch": update,
+    });
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          type: "localFile",
+          path: "durable-token",
+          name: "report.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 6,
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const dir = await mkdtemp(join(tmpdir(), "bb-queue-attachment-"));
+    try {
+      const file = join(dir, "report.pdf");
+      await writeFile(file, "report");
+      await expect(
+        runCommand(
+          [
+            "thread",
+            "queue",
+            "update",
+            "thread-1",
+            "queued-1",
+            "revised",
+            "--file",
+            file,
+          ],
+          register,
+        ),
+      ).rejects.toThrow("process.exit:1");
+
+      expect(console.error).toHaveBeenCalledWith(
+        "Error: Queued message queued-1 is being sent and cannot be edited.",
+      );
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+    } finally {
+      await rm(dir, { recursive: true });
+    }
   });
 
   it("reports when sending a queued message leaves it waiting", async () => {

@@ -1,5 +1,5 @@
+import { RESTART_RESUME_METADATA_KEY } from "@bb/domain";
 import type { DbConnection } from "../../src/connection.js";
-import { bumpThreadEventRewriteGeneration } from "../../src/data/event-rewrite-generation.js";
 import {
   createPromptHistoryEntry,
   listPromptHistoryPage,
@@ -7,15 +7,14 @@ import {
   listStoredThreadPromptHistoryRows,
 } from "../../src/data/prompt-history.js";
 import {
-  getThreadConversationOutlineRecord,
-  upsertThreadConversationOutlineRecord,
-} from "../../src/data/thread-conversation-outlines.js";
-import {
+  getThreadCodexAutoCompactTokenLimit,
   getThreadPluginMetadata,
+  insertThreadCodexAutoCompactTokenLimit,
   insertThreadPluginMetadata,
   listPluginThreadMetadata,
   listThreadPluginMetadataRows,
   patchThreadPluginMetadata,
+  readRestartResumeFacts,
 } from "../../src/data/thread-plugin-metadata.js";
 import {
   markThreadPruningPolicyWork,
@@ -133,7 +132,6 @@ const SECTIONS = "packages/db/src/data/thread-sections.ts";
 const RUN_STATE = "packages/db/src/data/thread-run-state.ts";
 const TABS = "packages/db/src/data/thread-tabs.ts";
 const PLUGIN_METADATA = "packages/db/src/data/thread-plugin-metadata.ts";
-const OUTLINES = "packages/db/src/data/thread-conversation-outlines.ts";
 const PRUNING = "packages/db/src/data/thread-pruning.ts";
 const PRUNING_WORK = "packages/db/src/data/thread-pruning-work.ts";
 const PURGES = "packages/db/src/data/thread-purges.ts";
@@ -163,17 +161,6 @@ function first<T>(values: readonly T[], label: string): T {
   return value;
 }
 
-function outlineItemsJson(turns: number): string {
-  return JSON.stringify(
-    Array.from({ length: turns * 2 }, (_, item) => ({
-      id: `outline-next-${item}`,
-      role: item % 2 === 0 ? "user" : "assistant",
-      preview: `Turn ${item}: check the failing build, fix the cause, and rerun the targeted tests.`,
-      attachmentSummary: null,
-    })),
-  );
-}
-
 function purgeThreadRows(db: DbConnection, threadId: string): void {
   while (
     deleteThreadPurgeBatch(db, {
@@ -186,7 +173,6 @@ function purgeThreadRows(db: DbConnection, threadId: string): void {
 }
 
 let reorderArgs: Omit<ReorderPinnedThreadArgs, "db" | "notifier"> | null = null;
-let nextOutlineItemsJson = "";
 
 function requireReorderArgs(): Omit<
   ReorderPinnedThreadArgs,
@@ -651,6 +637,41 @@ const TAB_CASES: readonly QueryCostCase<ThreadsSeed>[] = [
 
 const PLUGIN_METADATA_CASES: readonly QueryCostCase<ThreadsSeed>[] = [
   {
+    name: `${PLUGIN_METADATA}#getThreadCodexAutoCompactTokenLimit`,
+    prepare: (db, _fixture, seed) => {
+      db.transaction((tx) =>
+        insertThreadCodexAutoCompactTokenLimit(
+          tx,
+          seed.pluginMetadataThreadId,
+          200_000,
+        ),
+      );
+    },
+    run: (db, _fixture, seed) =>
+      getThreadCodexAutoCompactTokenLimit(db, seed.pluginMetadataThreadId),
+  },
+  {
+    name: `${PLUGIN_METADATA}#insertThreadCodexAutoCompactTokenLimit`,
+    run: (db, fixture) =>
+      db.transaction((tx) =>
+        insertThreadCodexAutoCompactTokenLimit(tx, fixture.threadId, 180_000),
+      ),
+  },
+  {
+    name: `${PLUGIN_METADATA}#readRestartResumeFacts`,
+    prepare: (db, _fixture, seed) => {
+      insertThreadPluginMetadata(db, {
+        threadId: seed.pluginMetadataThreadId,
+        pluginId: "tasks",
+        metadata: {
+          [RESTART_RESUME_METADATA_KEY]: { hold: false, receiptBacked: true },
+        },
+      });
+    },
+    run: (db, _fixture, seed) =>
+      readRestartResumeFacts(db, seed.pluginMetadataThreadId),
+  },
+  {
     name: `${PLUGIN_METADATA}#getThreadPluginMetadata`,
     run: (db, _fixture, seed) =>
       getThreadPluginMetadata(
@@ -695,45 +716,6 @@ const PLUGIN_METADATA_CASES: readonly QueryCostCase<ThreadsSeed>[] = [
         set: { state: "merged", mergedAt: Date.now() },
         remove: ["checks"],
       }),
-  },
-];
-
-const OUTLINE_CASES: readonly QueryCostCase<ThreadsSeed>[] = [
-  {
-    name: `${OUTLINES}#getThreadConversationOutlineRecord`,
-    growsWith: {
-      history:
-        "Reads the thread's stored outline JSON, one item per turn, so the row grows with the thread",
-    },
-    run: (db, fixture) =>
-      getThreadConversationOutlineRecord(db, fixture.threadId),
-  },
-  {
-    name: `${OUTLINES}#upsertThreadConversationOutlineRecord`,
-    growsWith: {
-      history:
-        "Writes the thread's stored outline JSON, one item per turn, so the row grows with the thread",
-    },
-    prepare: (_db, fixture) => {
-      nextOutlineItemsJson = outlineItemsJson(fixture.turns.length + 1);
-    },
-    run: (db, fixture) =>
-      upsertThreadConversationOutlineRecord(db, {
-        threadId: fixture.threadId,
-        projectionKey: `v3:${fixture.latestSequence + 1}`,
-        itemsJson: nextOutlineItemsJson,
-      }),
-  },
-  {
-    name: "packages/db/src/data/event-rewrite-generation.ts#bumpThreadEventRewriteGeneration",
-    prepare: (db, fixture) =>
-      upsertThreadConversationOutlineRecord(db, {
-        threadId: fixture.threadId,
-        projectionKey: `v3:${fixture.latestSequence}`,
-        itemsJson: outlineItemsJson(fixture.turns.length),
-      }),
-    run: (db, fixture) =>
-      bumpThreadEventRewriteGeneration(db, fixture.threadId),
   },
 ];
 
@@ -980,7 +962,6 @@ export const THREADS_COST_GROUP = registerCostGroup<ThreadsSeed>({
     ...SECTION_CASES,
     ...TAB_CASES,
     ...PLUGIN_METADATA_CASES,
-    ...OUTLINE_CASES,
     ...PRUNING_CASES,
     ...PURGE_CASES,
     ...PROMPT_HISTORY_CASES,

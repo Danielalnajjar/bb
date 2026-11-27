@@ -1,3 +1,4 @@
+import { validateConnectOrigin } from "@bb/config/public-url";
 import { WebSocket as NodeWebSocket } from "ws";
 import {
   PROTOCOL_VERSION,
@@ -43,6 +44,7 @@ export type ConnectTunnelFetch = (
 
 interface ConnectTunnelClientOptions {
   serverUrl: string;
+  connectOrigin?: string;
   hostName: string;
   machineCredential?: string;
   logger: HostDaemonLogger;
@@ -130,7 +132,13 @@ export class ConnectTunnelClient {
   private credentialRejected = false;
   private stopped = false;
 
+  private readonly connectOrigin: string;
+
   constructor(private readonly options: ConnectTunnelClientOptions) {
+    this.connectOrigin =
+      options.connectOrigin === undefined
+        ? options.serverUrl
+        : validateConnectOrigin(options.connectOrigin);
     this.createWebSocket =
       options.createWebSocket ??
       ((url, websocketOptions) =>
@@ -188,7 +196,7 @@ export class ConnectTunnelClient {
     }
     let gate: TrustedConnectGate;
     try {
-      gate = resolveTrustedConnectGate(this.options.serverUrl);
+      gate = resolveTrustedConnectGate(this.connectOrigin);
     } catch (error) {
       return Promise.reject(error);
     }
@@ -204,6 +212,7 @@ export class ConnectTunnelClient {
     let pending: Promise<HostDaemonConnectTunnelIdentity>;
     pending = this.fetchFn(assignmentUrl, {
       method: "POST",
+      redirect: "error",
       headers: {
         "content-type": "application/json",
         "x-bb-connect-machine": credential,

@@ -58,6 +58,7 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
     launch: {
       displayName: "Cursor",
       command: "cursor-agent",
+      commandEnv: "BB_CURSOR_AGENT_EXECUTABLE",
       args: ["acp"],
       env: {},
       modelCli: {

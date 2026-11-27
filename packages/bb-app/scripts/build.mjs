@@ -55,6 +55,13 @@ for (const [sourceName, outputName] of entrypoints) {
 
 await buildNodeEsmEntry({
   cleanDist: false,
+  entryPoint: resolve(packageRoot, "src", "bin", "local-prestart.mjs"),
+  outfile: resolve(packageRoot, "dist", "local-prestart.js"),
+  packageRoot,
+});
+
+await buildNodeEsmEntry({
+  cleanDist: false,
   entryPoint: resolve(packageRoot, "src", "public-sdk.ts"),
   outfile: resolve(packageRoot, "dist", "index.js"),
   packageRoot,

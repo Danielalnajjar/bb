@@ -1,4 +1,5 @@
 import { requestThreadStorageDeletion } from "./thread-lifecycle.js";
+import { z } from "zod";
 import { seedThreadSessionOptionSelections } from "./thread-session-options.js";
 import {
   admitAfterPathClaimsSettle,
@@ -80,6 +81,7 @@ import {
 } from "../plugins/plugin-environment-provider-registry.js";
 
 type ThreadCreateDeps = LoggedPendingInteractionWorkSessionDeps;
+const codexAutoCompactTokenLimitSchema = z.int().min(100_000).max(400_000);
 
 interface CreateProvisioningThreadArgs {
   environmentId: string | null;
@@ -725,12 +727,22 @@ export async function createThreadFromRequest(
     providerId: requestInput.providerId,
   });
   const {
+    codexAutoCompactTokenLimit,
     originKind: _requestedOriginKind,
     parentThreadId: _requestedParentThreadId,
     pluginMetadata: _requestedPluginMetadata,
     sourceThreadId: _requestedSourceThreadId,
     ...requestRest
   } = requestInput;
+  const compactLimit = codexAutoCompactTokenLimitSchema.safeParse(
+    codexAutoCompactTokenLimit,
+  );
+  if (codexAutoCompactTokenLimit !== undefined && !compactLimit.success) {
+    deps.logger.warn(
+      { projectId: project.id },
+      "Ignoring invalid Codex auto-compaction token limit: expected an integer from 100,000 to 400,000",
+    );
+  }
   const requestedEnvironment = await resolveCreateThreadEnvironment(deps, {
     parentThread:
       forkSourceEnvironmentId !== undefined
@@ -757,6 +769,9 @@ export async function createThreadFromRequest(
       : {}),
     ...(sourceThread ? { sourceThreadId: sourceThread.id } : {}),
     originKind,
+    ...(compactLimit.success
+      ? { codexAutoCompactTokenLimit: compactLimit.data }
+      : {}),
     parentNotifications: requestInput.parentNotifications ?? "auto",
     pluginMetadata,
     visibility: resolveCreateThreadVisibility({

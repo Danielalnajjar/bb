@@ -20,6 +20,7 @@ export function queueInputForStartingTurn(
   args: {
     claimed: readonly ClaimedQueuedThreadMessageRow[] | null;
     input: QueuedDispatchMessage;
+    preserveSchedule: boolean;
     threadId: string;
   },
 ): QueueInputForStartingTurnResult {
@@ -50,6 +51,7 @@ export function queueInputForStartingTurn(
           sendAt: null,
           recheckAt: null,
           claimed: args.claimed,
+          preserveSchedule: args.preserveSchedule,
         },
       );
       return entry === null

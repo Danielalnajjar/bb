@@ -1,15 +1,18 @@
 import {
   getAppSettings,
   getDatabaseDataVersion,
+  getConversationOutlineGeneration,
   getThreadPluginMetadata,
   patchThreadPluginMetadata,
   getLatestThreadSequence,
-  getLatestStoredConversationOutlineSequence,
-  listQueuedThreadMessages,
+  getThreadEventRewriteGeneration,
+  listThreadQueuedMessagesIncludingClaims,
+  type DbQueryConnection,
 } from "@bb/db";
 import type { Hono } from "hono";
 import {
   PROMPT_HISTORY_ENTRY_LIMIT,
+  RESTART_RESUME_METADATA_KEY,
   threadEventTypeSchema,
   type Thread,
   type ThreadEventType,
@@ -19,16 +22,19 @@ import {
   THREAD_EVENT_LIST_PAGE_SIZE,
   typedRoutes,
   type PublicApiSchema,
-  type ThreadConversationOutlineResponse,
   type ThreadTimelineQuery,
 } from "@bb/server-contract";
 import type { AppDeps } from "../../types.js";
 import { COMMAND_TIMEOUT_MS } from "../../constants.js";
 import { ApiError } from "../../errors.js";
+import { readThreadData } from "../../services/threads/thread-reads.js";
+import type { ThreadReadResult } from "../../services/threads/thread-read-contract.js";
 import { requirePublicThread } from "../../services/lib/entity-lookup.js";
 import { callHostRetryableOnlineRpc } from "../../services/hosts/online-rpc.js";
 import { requireThreadStorageTarget } from "../../services/threads/thread-storage.js";
 import { toThreadQueuedMessage } from "../../services/threads/thread-queued-messages.js";
+import { readLoggedRestartResumeFacts } from "../../services/threads/queue-waits.js";
+import { requestQueuedMessageDispatch } from "../../services/threads/queued-message-dispatch.js";
 import { isCompactionOfferEnabled } from "../../services/threads/compaction-offer.js";
 import {
   readThreadContextWindowUsage,
@@ -37,9 +43,7 @@ import {
 } from "../../services/threads/thread-head-state.js";
 import {
   buildThreadConversationOutlineProjectionKey,
-  getThreadMessage,
   buildTimelineTurnSummaryDetails,
-  loadThreadConversationOutline,
   THREAD_TIMELINE_DEFAULT_SEGMENT_LIMIT,
   THREAD_TIMELINE_SEGMENT_LIMIT_MAX,
 } from "../../services/threads/timeline.js";
@@ -145,6 +149,24 @@ function parseThreadTimelinePage(
   };
 }
 
+function outlineBody(
+  cached: { bytes: Uint8Array<ArrayBuffer>; maxSeq: number },
+  maxSeq: number,
+): ReadableStream<Uint8Array<ArrayBuffer>> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(
+        cached.bytes.subarray(
+          0,
+          cached.bytes.length - String(cached.maxSeq).length - 1,
+        ),
+      );
+      controller.enqueue(new TextEncoder().encode(`${maxSeq}}`));
+      controller.close();
+    },
+  });
+}
+
 export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
   const { get, patch } = typedRoutes<PublicApiSchema>(app, {
     onValidationError: (msg) => new ApiError(400, "invalid_request", msg),
@@ -152,8 +174,20 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
   const routes = publicApiRoutes.threads;
   const timelineWindows = createThreadTimelineWindows(deps);
   const conversationOutlineCache = createThreadDerivedCache<
-    ThreadConversationOutlineResponse["items"]
+    Extract<ThreadReadResult, { kind: "outline" }>
   >({ maxEntries: 128, bytes: null });
+  const pendingConversationOutlines = new Map<
+    string,
+    ReturnType<typeof readThreadData>
+  >();
+  const pendingThreadMessages = new Map<
+    string,
+    ReturnType<typeof readThreadData>
+  >();
+  const readConversationVersion = (threadId: string) => ({
+    dataVersion: getDatabaseDataVersion(deps.db),
+    eventRewriteGeneration: getThreadEventRewriteGeneration(threadId),
+  });
   const resolveConversationRowsOptions = (thread: Thread) => {
     const providerDisplayName = resolveThreadProviderDisplayName(
       deps,
@@ -189,12 +223,36 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
 
   patch(routes.pluginMetadata.update, (context, payload) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
-    const result = patchThreadPluginMetadata(deps.db, {
-      threadId: thread.id,
-      pluginId: payload.pluginId,
-      set: payload.set ?? {},
-      remove: payload.remove ?? [],
-    });
+    const set = payload.set ?? {};
+    const remove = payload.remove ?? [];
+    const update = (db: DbQueryConnection) =>
+      patchThreadPluginMetadata(db, {
+        threadId: thread.id,
+        pluginId: payload.pluginId,
+        set,
+        remove,
+      });
+    const touchesRestartResume =
+      Object.hasOwn(set, RESTART_RESUME_METADATA_KEY) ||
+      remove.includes(RESTART_RESUME_METADATA_KEY);
+    const { result, released } = touchesRestartResume
+      ? deps.db.transaction(
+          (tx) => {
+            const readFacts = () =>
+              readLoggedRestartResumeFacts(
+                { db: tx, logger: deps.logger },
+                thread.id,
+              );
+            const wasHeld = readFacts().hold !== null;
+            const result = update(tx);
+            return {
+              result,
+              released: result.ok && wasHeld && readFacts().hold === null,
+            };
+          },
+          { behavior: "immediate" },
+        )
+      : { result: update(deps.db), released: false };
     if (!result.ok) {
       throw new ApiError(
         413,
@@ -206,6 +264,12 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
       deps.logger.warn(
         `Replaced corrupt plugin metadata for thread ${thread.id}, plugin ${payload.pluginId}`,
       );
+    }
+    if (released) {
+      requestQueuedMessageDispatch(deps, {
+        kind: "restart-resume-released",
+        threadId: thread.id,
+      });
     }
     return context.json(result.metadata);
   });
@@ -249,42 +313,84 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     );
   });
 
-  get(routes.conversationOutline, (context, query) => {
+  get(routes.conversationOutline, async (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
-    const selectItems = (items: ThreadConversationOutlineResponse["items"]) =>
-      query.role === undefined
-        ? items
-        : items.filter((item) => item.role === query.role);
-
-    const outlineSequence = getLatestStoredConversationOutlineSequence(
-      deps.db,
-      { threadId: thread.id },
-    );
     const outlineOptions = resolveConversationRowsOptions(thread);
-    const { maxSeq } = outlineOptions;
-    const items = conversationOutlineCache.getOrBuild({
-      slot: thread.id,
-      threadId: thread.id,
-      revision: JSON.stringify([
+    const role = query.role ?? null;
+    const slot = JSON.stringify([thread.id, role]);
+    const readVersion = () => ({
+      dataVersion: getDatabaseDataVersion(deps.db),
+      eventRewriteGeneration: getThreadEventRewriteGeneration(thread.id),
+    });
+    const keyFor = (current: Thread, options: typeof outlineOptions) =>
+      JSON.stringify([
         getDatabaseDataVersion(deps.db),
         buildThreadConversationOutlineProjectionKey(
-          thread,
-          outlineSequence,
-          outlineOptions,
+          current,
+          getConversationOutlineGeneration(deps.db, current.id),
+          options,
         ),
-      ]),
-      build: () => ({
+      ]);
+
+    const version = readVersion();
+    const cacheKey = keyFor(thread, outlineOptions);
+    const cached = conversationOutlineCache.get(slot, cacheKey);
+    if (cached !== undefined) {
+      return context.body(outlineBody(cached, outlineOptions.maxSeq), 200, {
+        "Content-Type": "application/json",
+      });
+    }
+    const pendingKey = JSON.stringify([slot, cacheKey, outlineOptions.maxSeq]);
+    const task = {
+      kind: "outline" as const,
+      threadId: thread.id,
+      providerCompletedTurnDisplay:
+        deps.providerRegistry.get(thread.providerId)?.info
+          .completedTurnDisplay ?? null,
+      providerDisplayName: outlineOptions.providerDisplayName ?? null,
+      eventRewriteGeneration: version.eventRewriteGeneration,
+      role,
+    };
+    let pending = pendingConversationOutlines.get(pendingKey);
+    if (pending === undefined) {
+      pending = readThreadData(deps.db, {
+        ...task,
+        serverDataVersion: version.dataVersion,
+      }).finally(() => pendingConversationOutlines.delete(pendingKey));
+      pendingConversationOutlines.set(pendingKey, pending);
+    }
+    let result = await pending;
+    const currentVersion = readVersion();
+    const versionChanged =
+      currentVersion.dataVersion !== version.dataVersion ||
+      currentVersion.eventRewriteGeneration !== version.eventRewriteGeneration;
+    if (versionChanged) {
+      result = await readThreadData(deps.db, {
+        ...task,
+        eventRewriteGeneration: currentVersion.eventRewriteGeneration,
+      });
+    }
+    if (result.kind !== "outline")
+      throw new Error("Unexpected outline response");
+    const current = requirePublicThread(deps.db, thread.id);
+    const currentOptions = resolveConversationRowsOptions(current);
+    if (
+      !versionChanged &&
+      keyFor(current, currentOptions) === cacheKey &&
+      result.projectionKey ===
+        buildThreadConversationOutlineProjectionKey(current, 0, currentOptions)
+    ) {
+      conversationOutlineCache.store(slot, cacheKey, thread.id, {
         expiresAt: null,
-        value: loadThreadConversationOutline(deps.db, thread, {
-          ...outlineOptions,
-          outlineSequence,
-        }).items,
-      }),
+        value: result,
+      });
+    }
+    return context.body(result.bytes, 200, {
+      "Content-Type": "application/json",
     });
-    return context.json({ items: selectItems(items), maxSeq });
   });
 
-  get(routes.message, (context, query) => {
+  get(routes.message, async (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     const seq = context.req.param("seq");
     if (!/^\d+$/.test(seq)) {
@@ -294,14 +400,62 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
         "Message seq must be a non-negative integer",
       );
     }
-    return context.json(
-      getThreadMessage(deps.db, thread, {
-        ...resolveConversationRowsOptions(thread),
-        seq: parseInteger(seq, "seq"),
-        before: parseOptionalInteger(query.before, "before") ?? 0,
-        after: parseOptionalInteger(query.after, "after") ?? 0,
-      }),
-    );
+    const messageSeq = parseInteger(seq, "seq");
+    const before = parseOptionalInteger(query.before, "before") ?? 0;
+    const after = parseOptionalInteger(query.after, "after") ?? 0;
+    const maxSeq = getLatestThreadSequence(deps.db, { threadId: thread.id });
+    const providerCompletedTurnDisplay =
+      deps.providerRegistry.get(thread.providerId)?.info.completedTurnDisplay ??
+      null;
+    const providerDisplayName =
+      resolveThreadProviderDisplayName(deps, thread.providerId) ?? null;
+    const version = readConversationVersion(thread.id);
+    const task = {
+      kind: "message" as const,
+      threadId: thread.id,
+      providerCompletedTurnDisplay,
+      providerDisplayName,
+      eventRewriteGeneration: version.eventRewriteGeneration,
+      seq: messageSeq,
+      before,
+      after,
+    };
+    const pendingKey = JSON.stringify([
+      thread.id,
+      messageSeq,
+      before,
+      after,
+      version.dataVersion,
+      version.eventRewriteGeneration,
+      maxSeq,
+      providerCompletedTurnDisplay,
+      providerDisplayName,
+    ]);
+    let pending = pendingThreadMessages.get(pendingKey);
+    if (pending === undefined) {
+      pending = readThreadData(deps.db, {
+        ...task,
+        serverDataVersion: version.dataVersion,
+      }).finally(() => pendingThreadMessages.delete(pendingKey));
+      pendingThreadMessages.set(pendingKey, pending);
+    }
+    let result = await pending;
+    const currentVersion = readConversationVersion(thread.id);
+    if (
+      currentVersion.dataVersion !== version.dataVersion ||
+      currentVersion.eventRewriteGeneration !== version.eventRewriteGeneration
+    ) {
+      result = await readThreadData(deps.db, {
+        ...task,
+        eventRewriteGeneration: currentVersion.eventRewriteGeneration,
+      });
+    }
+    if (result.kind !== "message") {
+      throw new Error("Unexpected message response");
+    }
+    return context.body(result.bytes, 200, {
+      "Content-Type": "application/json",
+    });
   });
 
   get(routes.timelineTurnSummaryDetails, (context, query) => {
@@ -341,7 +495,9 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     const threadId = context.req.param("id");
     requirePublicThread(deps.db, threadId);
     return context.json(
-      listQueuedThreadMessages(deps.db, threadId).map(toThreadQueuedMessage),
+      listThreadQueuedMessagesIncludingClaims(deps.db, threadId).map(
+        toThreadQueuedMessage,
+      ),
     );
   });
 

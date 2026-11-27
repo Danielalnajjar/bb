@@ -35,6 +35,8 @@ export interface QueryPlanExecutionObserver {
 }
 
 export interface CreateConnectionOptions {
+  readonly?: boolean;
+  cacheSizeKib?: number;
   slowQueryLogger?: SlowDbQueryLogger;
   synchronousWorkTracker?: DbSynchronousWorkTracker;
   slowQueryThresholdMs?: number | (() => number);
@@ -421,13 +423,21 @@ export function createConnection(
   source: string | Buffer = "bb.db",
   options: CreateConnectionOptions = {},
 ) {
-  const sqlite = new Database(source);
+  const sqlite = new Database(source, { readonly: options.readonly ?? false });
 
-  sqlite.pragma("auto_vacuum = INCREMENTAL");
-  sqlite.pragma("journal_mode = WAL");
+  if (!options.readonly) {
+    sqlite.pragma("auto_vacuum = INCREMENTAL");
+    sqlite.pragma("journal_mode = WAL");
+  }
   sqlite.pragma("foreign_keys = ON");
   sqlite.pragma("synchronous = NORMAL");
-  sqlite.pragma(`cache_size = -${SQLITE_CACHE_SIZE_KIB}`);
+  const cacheSizeKib =
+    options.cacheSizeKib !== undefined &&
+    Number.isInteger(options.cacheSizeKib) &&
+    options.cacheSizeKib > 0
+      ? options.cacheSizeKib
+      : SQLITE_CACHE_SIZE_KIB;
+  sqlite.pragma(`cache_size = -${cacheSizeKib}`);
   sqlite.pragma(`mmap_size = ${SQLITE_MMAP_SIZE_BYTES}`);
   sqlite.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
   registerHostPathSqlFunctions(sqlite);

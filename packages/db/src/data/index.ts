@@ -1,3 +1,4 @@
+export { getConversationOutlineGeneration } from "./conversation-outline-generation.js";
 export * from "./app-settings.js";
 export * from "./app-theme.js";
 export * from "./auth-api-keys.js";
@@ -8,6 +9,7 @@ export {
   bumpThreadEventRewriteGeneration,
   getDatabaseDataVersion,
   getThreadEventRewriteGeneration,
+  getThreadTimelineOrderingGeneration,
 } from "./event-rewrite-generation.js";
 export * from "./events.js";
 export * from "./experiments.js";
@@ -37,7 +39,6 @@ export * from "./sessions.js";
 export * from "./sweep-item-failures.js";
 export * from "./sweeps.js";
 export * from "./terminal-sessions.js";
-export * from "./thread-conversation-outlines.js";
 export * from "./thread-plugin-metadata.js";
 export * from "./thread-pruning.js";
 export * from "./thread-purges.js";

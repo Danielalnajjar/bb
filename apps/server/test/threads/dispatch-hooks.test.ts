@@ -1,12 +1,20 @@
 import {
   createQueuedThreadMessage,
+  getQueuedThreadMessage,
   getThread,
   listQueuedThreadMessages,
   listQueuedThreadMessagesForApi,
   listRunningThreads,
+  migrate,
   setQueuedThreadMessageGroupBoundary,
 } from "@bb/db";
-import type { ThreadQueuedMessage } from "@bb/domain";
+import {
+  threadChangedMessageSchema,
+  turnRequestEventDataSchema,
+  turnScope,
+  type ThreadQueuedMessage,
+} from "@bb/domain";
+import { groupHostDaemonEvents } from "@bb/host-daemon-contract";
 import { createDeferredPromise } from "@bb/test-helpers";
 import type { StartedOnBehalfOf } from "@bb/domain";
 import type {
@@ -30,11 +38,14 @@ import { acceptThreadSendRequest } from "../../src/services/threads/thread-send-
 import { attemptDispatch } from "../../src/services/threads/dispatch-attempt.js";
 import { runQueuedMessageDispatch } from "../../src/services/threads/queued-message-dispatch.js";
 import { createThreadFromRequest } from "../../src/services/threads/thread-create.js";
+import { retryFailedTurn } from "../../src/services/threads/turn-retry.js";
 import { moveThreadStatus } from "../helpers/thread-status.js";
+import { createMockHubSocket } from "../helpers/mock-hub-socket.js";
 import { createClientTurnRequestId } from "../../src/services/threads/thread-events.js";
 import { toThreadQueuedMessage } from "../../src/services/threads/thread-queued-messages.js";
 import { textInput } from "../helpers/prompt-input.js";
 import {
+  internalAuthHeaders,
   listQueuedThreadCommands,
   reportQueuedCommandSuccess,
   waitForQueuedCommand,
@@ -44,6 +55,7 @@ import {
   seedHostSession,
   seedProjectWithSource,
   seedThread,
+  seedThreadFixture,
   seedThreadRuntimeState,
   seedTurnStarted,
 } from "../helpers/seed.js";
@@ -250,6 +262,121 @@ describe("message.dispatch hook context", () => {
         reason: "Draft",
       });
       expect(onlyQueuedRow(harness, thread.id).sendAt).toBe(sendAt);
+    });
+  });
+
+  it("keeps a plugin-held follow-up scheduled when the active turn ends early", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setImmediate", "clearImmediate"] });
+    await withTestHarness(async (harness) => {
+      const { environment, host, session, thread } = seedThreadFixture(
+        harness,
+        { thread: { status: "active" } },
+      );
+      const providerThreadId = `provider-${thread.id}`;
+      const turnId = `turn-${thread.id}`;
+      seedThreadRuntimeState(harness.deps, {
+        environmentId: environment.id,
+        providerThreadId,
+        threadId: thread.id,
+      });
+      seedTurnStarted(harness.deps, {
+        environmentId: environment.id,
+        providerThreadId,
+        threadId: thread.id,
+        turnId,
+      });
+      const offers: { status: string; queuedIds: string[] }[] = [];
+      installHooks({
+        "message.dispatch": [
+          {
+            pluginId: "limiter",
+            handler: (context) => {
+              offers.push({
+                status: context.thread.status,
+                queuedIds: context.queuedMessages.map(({ id }) => id),
+              });
+              return context.thread.status === "active"
+                ? { action: "wait", reason: "Waiting for idle" }
+                : { action: "proceed" };
+            },
+          },
+        ],
+      });
+      const sendAt = Date.now() + 60_000;
+      const input = textInput("Run the scheduled follow-up");
+      const sent = await harness.app.request(
+        `/api/v1/threads/${thread.id}/send`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ input, mode: "queue-if-active", sendAt }),
+        },
+      );
+      expect(sent.status).toBe(200);
+      expect(await sent.json()).toMatchObject({ delivery: "queued" });
+      const [row] = listQueuedThreadMessages(harness.db, thread.id);
+      expect(row).toMatchObject({ waitHolder: "plugin:limiter" });
+      if (row === undefined)
+        throw new Error("Expected a plugin-held follow-up");
+      expect(offers).toEqual([{ status: "active", queuedIds: [] }]);
+
+      const completed = await harness.app.request("/internal/session/events", {
+        method: "POST",
+        headers: internalAuthHeaders(harness, { hostId: host.id }),
+        body: JSON.stringify({
+          sessionId: session.id,
+          eventGroups: groupHostDaemonEvents([
+            {
+              threadId: thread.id,
+              event: {
+                type: "turn/completed",
+                threadId: thread.id,
+                providerThreadId,
+                scope: turnScope(turnId),
+                status: "completed",
+              },
+            },
+          ]),
+        }),
+      });
+      expect(completed.status, await completed.text()).toBe(200);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getThread(harness.db, thread.id)?.status).toBe("idle");
+      expect(turnRequests(harness, thread.id)).toHaveLength(1);
+      expect(queuedRows(harness, thread.id)).toEqual([
+        expect.objectContaining({
+          id: row.id,
+          sendAt,
+          waitingOn: {
+            kind: "plugin",
+            pluginId: "limiter",
+            reason: "Waiting for idle",
+          },
+        }),
+      ]);
+
+      vi.setSystemTime(sendAt - 1);
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "time-reached",
+        now: Date.now(),
+      });
+      expect(turnRequests(harness, thread.id)).toHaveLength(1);
+
+      vi.setSystemTime(sendAt);
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "time-reached",
+        now: Date.now(),
+      });
+      const requests = turnRequests(harness, thread.id);
+      expect(requests).toHaveLength(2);
+      expect(
+        turnRequestEventDataSchema.parse(JSON.parse(requests[1]!.data)).input,
+      ).toMatchObject(input);
+      expect(offers).toEqual([
+        { status: "active", queuedIds: [] },
+        { status: "idle", queuedIds: [row.id] },
+      ]);
+      expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([]);
     });
   });
 
@@ -1178,6 +1305,127 @@ describe("message.dispatch grouped authors", () => {
 });
 
 describe("message.dispatch hooks on the queue drain", () => {
+  it.each(["existing", "pending"] as const)(
+    "notifies a connected Queue panel after dispatch consumes a held message (%s thread)",
+    async (kind) => {
+      await withTestHarness(async (harness) => {
+        const entered = createDeferredPromise<void>();
+        const release = createDeferredPromise<void>();
+        installHooks({
+          "message.dispatch": [
+            {
+              pluginId: "limiter",
+              handler: async ({ queuedMessages }) => {
+                if (queuedMessages.length === 0) {
+                  return { action: "wait", reason: "Preparing admission" };
+                }
+                entered.resolve();
+                await release.promise;
+                return { action: "proceed" };
+              },
+            },
+          ],
+        });
+        const input = textInput("Do the thing");
+        let thread;
+        if (kind === "pending") {
+          const { host, project } = seedDispatchFixture(
+            harness,
+            "host-queue-panel",
+          );
+          thread = await createHookedThread(harness, {
+            hostId: host.id,
+            projectId: project.id,
+          });
+        } else {
+          ({ thread } = seedRunnableThread(harness, {
+            hostId: "host-queue-panel",
+            status: "idle",
+          }));
+          const sent = await harness.app.request(
+            `/api/v1/threads/${thread.id}/send`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ input, mode: "auto" }),
+            },
+          );
+          expect(sent.status).toBe(200);
+          expect(await sent.json()).toMatchObject({ delivery: "queued" });
+        }
+        const queued = onlyQueuedRow(harness, thread.id);
+        const turnsBefore = turnRequests(harness, thread.id).length;
+        const queuePath = `/api/v1/threads/${thread.id}/queued-messages`;
+        const notifications: Array<{
+          state: string | null;
+          inTransaction: boolean;
+        }> = [];
+        const socket = createMockHubSocket();
+        harness.hub.subscribe(
+          {
+            ...socket,
+            send(raw) {
+              const message = threadChangedMessageSchema.safeParse(
+                JSON.parse(raw),
+              );
+              if (
+                message.success &&
+                message.data.id === thread.id &&
+                message.data.changes.includes("queue-changed")
+              ) {
+                notifications.push({
+                  state:
+                    getQueuedThreadMessage(harness.db, queued.id)?.state ??
+                    null,
+                  inTransaction: harness.db.$client.inTransaction,
+                });
+              }
+            },
+          },
+          { kind: "thread-detail", threadId: thread.id },
+        );
+
+        const draining = runQueuedMessageDispatch(harness.deps, {
+          kind: "plugin-recheck",
+        });
+        try {
+          await Promise.race([entered.promise, draining]);
+          expect(notifications).toEqual([
+            { state: "claimed", inTransaction: false },
+          ]);
+          const response = await harness.app.request(queuePath);
+          expect(response.status).toBe(200);
+          expect(await response.json()).toMatchObject([
+            {
+              id: queued.id,
+              waitingOn: { kind: "plugin", reason: "Preparing admission" },
+            },
+          ]);
+          expect(turnRequests(harness, thread.id)).toHaveLength(turnsBefore);
+        } finally {
+          release.resolve();
+          await draining;
+        }
+
+        const response = await harness.app.request(queuePath);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual([]);
+        expect(
+          turnRequests(harness, thread.id)
+            .slice(turnsBefore)
+            .map(
+              ({ data }) =>
+                turnRequestEventDataSchema.parse(JSON.parse(data)).input,
+            ),
+        ).toEqual([input]);
+        expect(notifications).toEqual([
+          { state: "claimed", inTransaction: false },
+          { state: null, inTransaction: false },
+        ]);
+      });
+    },
+  );
+
   it("keeps a plugin's submitted message held by that plugin while an earlier plugin also waits", async () => {
     await withTestHarness(async (harness) => {
       vi.useFakeTimers({ toFake: ["Date"] });
@@ -1570,6 +1818,176 @@ describe("a scheduled send held by a plugin wait", () => {
     });
   }
 
+  it.each([
+    { timing: "before", offset: -1, how: "plugin-unregistered" },
+    { timing: "after", offset: 1, how: "recheck" },
+  ] as const)(
+    "honors a carry-era plugin-held deadline on release $timing the scheduled time",
+    async ({ offset, how }) => {
+      await withTestHarness(async (harness) => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        const { thread } = seedRunnableThread(harness, {
+          hostId: "host-legacy-plugin-schedule",
+          status: "idle",
+        });
+        const notBefore = Date.now() + SCHEDULED_IN_MS;
+        const recheckAt = notBefore + 60_000;
+        const input = textInput("legacy scheduled prompt");
+        await acceptThreadSendRequest(harness.deps, {
+          payload: { input, mode: "auto", sendAt: notBefore },
+          thread,
+        });
+        const row = onlyQueuedRow(harness, thread.id);
+        const sqlite = harness.db.$client;
+        const carryMigrationTimestamp = 1795025543077;
+        sqlite.exec(`
+          DROP INDEX queued_thread_messages_recheck_idx;
+          DROP INDEX threads_fork_history_copy_idx;
+          DROP INDEX threads_search_order_idx;
+          DROP INDEX environments_path_idx;
+          ALTER TABLE queued_thread_messages DROP COLUMN recheck_at;
+          ALTER TABLE hosts DROP COLUMN teardown_blocked_by_environment_id;
+          ALTER TABLE hosts ADD COLUMN suspend_retry_at INTEGER;
+          ALTER TABLE plugin_marketplaces DROP COLUMN enabled;
+          ALTER TABLE environments DROP COLUMN held_by;
+          ALTER TABLE environments DROP COLUMN create_pending;
+          DELETE FROM __drizzle_migrations WHERE created_at > ${carryMigrationTimestamp};
+        `);
+        sqlite
+          .prepare(`
+          UPDATE queued_thread_messages
+          SET state = 'scheduled', send_at = ?, wait_holder = 'plugin:limiter', waiting_on = ?
+          WHERE id = ?
+        `)
+          .run(
+            recheckAt,
+            JSON.stringify({
+              kind: "plugin",
+              pluginId: "limiter",
+              reason: "At capacity",
+              notBefore,
+            }),
+            row.id,
+          );
+
+        migrate(harness.db);
+        expect(getQueuedThreadMessage(harness.db, row.id)?.recheckAt).toBe(
+          recheckAt,
+        );
+        const turnsBefore = turnRequests(harness, thread.id).length;
+        vi.setSystemTime(notBefore + offset);
+        await release(harness, how, null);
+        if (offset < 0) {
+          expect(turnRequests(harness, thread.id)).toHaveLength(turnsBefore);
+          expect(onlyQueuedRow(harness, thread.id)).toMatchObject({
+            sendAt: notBefore,
+            waitingOn: { kind: "time" },
+          });
+
+          vi.setSystemTime(notBefore);
+          await runQueuedMessageDispatch(harness.deps, {
+            kind: "time-reached",
+            now: notBefore,
+          });
+        }
+
+        const requests = turnRequests(harness, thread.id);
+        expect(requests).toHaveLength(turnsBefore + 1);
+        expect(
+          turnRequestEventDataSchema.parse(JSON.parse(requests.at(-1)!.data))
+            .input,
+        ).toMatchObject(input);
+        expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([]);
+      });
+    },
+  );
+
+  it.each(["during a timed hold", "after capacity opens"] as const)(
+    "preserves each group member's schedule when the plugin rechecks %s before ungrouping",
+    async (timing) => {
+      await withTestHarness(async (harness) => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        const { thread } = seedRunnableThread(harness, {
+          hostId: "host-plugin-mixed-schedule",
+          status: "idle",
+        });
+        const sendAt = Date.now() + SCHEDULED_IN_MS;
+        const timedHold = timing === "during a timed hold";
+        const recheckAt = timedHold ? Date.now() + 60_000 : null;
+        let atCapacity = true;
+        installHooks({
+          "message.dispatch": [
+            {
+              pluginId: "limiter",
+              handler: () =>
+                atCapacity
+                  ? { action: "wait", reason: "At capacity", recheckAt }
+                  : { action: "proceed" },
+            },
+          ],
+        });
+        const unscheduledInput = textInput("not scheduled");
+        await acceptThreadSendRequest(harness.deps, {
+          payload: { input: unscheduledInput, mode: "auto" },
+          thread,
+        });
+        await acceptThreadSendRequest(harness.deps, {
+          payload: { input: textInput("scheduled"), mode: "auto", sendAt },
+          thread,
+        });
+        const [unscheduled, scheduled] = queuedRows(harness, thread.id);
+        if (unscheduled === undefined || scheduled === undefined)
+          throw new Error("Expected two held prompts");
+
+        const setBoundary = async (ids: string[], boundary: string) => {
+          const response = await harness.app.request(
+            `/api/v1/threads/${thread.id}/queued-messages/group-boundary`,
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                expectedGroupedPrefixQueuedMessageIds: ids,
+                groupBoundaryQueuedMessageId: boundary,
+              }),
+            },
+          );
+          expect(response.status).toBe(200);
+        };
+        await setBoundary([unscheduled.id, scheduled.id], scheduled.id);
+        const turnsBefore = turnRequests(harness, thread.id).length;
+
+        atCapacity = timedHold;
+        await release(
+          harness,
+          timedHold ? "recheck-due" : "recheck",
+          recheckAt,
+        );
+        expect(turnRequests(harness, thread.id)).toHaveLength(turnsBefore);
+
+        await setBoundary([unscheduled.id], unscheduled.id);
+        if (timedHold) {
+          await release(harness, "plugin-unregistered", null);
+        } else {
+          await runQueuedMessageDispatch(harness.deps, {
+            kind: "idle-recovery",
+            now: Date.now(),
+          });
+        }
+        const requests = turnRequests(harness, thread.id);
+        expect(requests).toHaveLength(turnsBefore + 1);
+        expect(
+          turnRequestEventDataSchema.parse(JSON.parse(requests.at(-1)!.data))
+            .input,
+        ).toMatchObject(unscheduledInput);
+        expect(onlyQueuedRow(harness, thread.id)).toMatchObject({
+          id: scheduled.id,
+          sendAt,
+          waitingOn: { kind: "time" },
+        });
+      });
+    },
+  );
+
   it("keeps the scheduled time across a re-attempt the plugin still holds", async () => {
     await withTestHarness(async (harness) => {
       vi.useFakeTimers({ toFake: ["Date"] });
@@ -1853,4 +2271,126 @@ describe("a wait decision's re-ask time", () => {
       expect(queuedRows(harness, thread.id)).toEqual([]);
     });
   });
+});
+
+describe("caller not-before under a plugin hold", () => {
+  it.each(["plugin unregister", "orphan sweep"] as const)(
+    "keeps the retry scheduled at its not-before after %s",
+    async (clear) => {
+      await withTestHarness(async (harness) => {
+        const registry = emptyRegistry();
+        registry["message.dispatch"].push({
+          pluginId: "limiter",
+          handler: () => ({ action: "wait", reason: "Account at capacity" }),
+        });
+        installHooks(registry);
+        const hostId = `host-not-before-${clear.replace(" ", "-")}`;
+        const { environment, project } = seedDispatchFixture(harness, hostId);
+        const thread = seedThread(harness.deps, {
+          environmentId: environment.id,
+          projectId: project.id,
+          status: "active",
+        });
+        seedThreadRuntimeState(harness.deps, {
+          environmentId: environment.id,
+          inputText: "Do the thing",
+          providerThreadId: `provider-${hostId}`,
+          threadId: thread.id,
+        });
+        moveThreadStatus(harness.deps, {
+          move: "run.failed",
+          threadId: thread.id,
+        });
+        const requests = () =>
+          turnRequests(harness, thread.id).map((event) =>
+            turnRequestEventDataSchema.parse(JSON.parse(event.data)),
+          );
+        const [original] = requests();
+        if (original === undefined) throw new Error("expected a failed turn");
+        const failed = getThread(harness.db, thread.id);
+        if (failed === null) throw new Error("expected a thread");
+        const notBefore = Date.now() + 60_000;
+        const publicWait = {
+          kind: "plugin",
+          pluginId: "limiter",
+          reason: "Account at capacity",
+        };
+
+        const retry = await retryFailedTurn(harness.deps, {
+          thread: failed,
+          request: {
+            turnRequestId: null,
+            sendAt: notBefore,
+            reason: "Rate limited",
+          },
+        });
+
+        expect(retry).toEqual({
+          ok: true,
+          delivery: "queued",
+          turnRequestId: original.requestId,
+          attempt: 2,
+          queuedMessageId: expect.any(String),
+          waitingOn: publicWait,
+          sendAt: notBefore,
+        });
+        expect(listQueuedThreadMessages(harness.db, thread.id)).toMatchObject([
+          {
+            waitingOn: JSON.stringify(publicWait),
+            sendAt: notBefore,
+          },
+        ]);
+        const listed = await harness.app.request(
+          `/api/v1/threads/${thread.id}/queued-messages`,
+        );
+        const listedRows: { waitingOn: unknown }[] = await listed.json();
+        expect(listedRows.map(({ waitingOn }) => waitingOn)).toEqual([
+          publicWait,
+        ]);
+
+        setPluginHookProvider(undefined);
+        await runQueuedMessageDispatch(
+          harness.deps,
+          clear === "plugin unregister"
+            ? { kind: "plugin-unregistered", pluginId: "limiter" }
+            : {
+                kind: "orphaned-plugin-recovery",
+                plugins: { isPluginExpectedToRun: () => false },
+              },
+        );
+        await runQueuedMessageDispatch(harness.deps, {
+          kind: "time-reached",
+          now: notBefore - 1,
+        });
+
+        expect(queuedRows(harness, thread.id)).toMatchObject([
+          {
+            id: retry.delivery === "queued" ? retry.queuedMessageId : null,
+            waitingOn: { kind: "time" },
+            sendAt: notBefore,
+            payload: {
+              kind: "retry",
+              retryOfTurnRequestId: original.requestId,
+              attempt: 2,
+            },
+          },
+        ]);
+        expect(requests()).toHaveLength(1);
+
+        await runQueuedMessageDispatch(harness.deps, {
+          kind: "time-reached",
+          now: notBefore,
+        });
+
+        expect(requests().slice(1)).toMatchObject([
+          {
+            initiator: "system",
+            retryOfRequestId: original.requestId,
+            retryAttempt: 2,
+          },
+        ]);
+        expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([]);
+      });
+    },
+  );
 });

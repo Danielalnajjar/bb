@@ -13,6 +13,10 @@ import {
 import {
   findLatestEditableUserTurnRequestRow,
   findStoredEditMessageOperationRow,
+  findStoredEventReceipt,
+  hasHandledRootTurnCompletion,
+  hasRootTurnSupersessionAfter,
+  hasThreadHistoryEditAfter,
   hasStoredCancelledThreadProvisioning,
   hasStoredProviderTurnCompletedSince,
   hasStoredThreadInterruptedSince,
@@ -22,6 +26,7 @@ import {
   appendStoredThreadEventInTransaction,
   appendStoredThreadEventsInTransaction,
   classifyStoredProviderThreadClaim,
+  clearThreadConversationOutlines,
   copyStoredThreadEventsInTransaction,
   deleteThreadEventSuffixInTransaction,
   findLastCompletedRootStoredTurn,
@@ -37,7 +42,6 @@ import {
   getLastStoredTurnRequestEvent,
   getLatestCompletedThreadContextClearSequence,
   getLatestModelFallbackRowSinceTurnRequest,
-  getLatestStoredConversationOutlineSequence,
   getLatestStoredRateLimitsEvent,
   getLatestStoredThreadEventOfTypes,
   getLatestThreadStopAim,
@@ -56,6 +60,7 @@ import {
   hasStoredSpawnAgentToolCall,
   hasStoredTurnCompleted,
   hasStoredTurnStarted,
+  isEventLifecycleApplied,
   isStoredTurnContextCompactionOnly,
   isStoredTurnMainRunIdle,
   isStoredTurnProviderCompactionRunning,
@@ -105,6 +110,8 @@ import {
   listTimelineRootWindowTurnIds,
   listTimelineWindowHintsDescending,
   listTodoSnapshotEventRowsForThread,
+  markEventLifecycleApplied,
+  markTurnCompletionParentNoticeHandled,
   pruneContextWindowUsageEventsInTransaction,
   pruneTokenUsageEventsInTransaction,
   resolveStoredProviderSessions,
@@ -258,6 +265,13 @@ type UsageEventType =
 
 let forkCopyRows: StoredEventRowMetadata[] = [];
 let pruningWindow: PruneTokenUsageEventsArgs | null = null;
+
+interface CompletionReceipt {
+  id: string;
+  status: string;
+}
+
+let completionReceipt: CompletionReceipt | null = null;
 
 function daemonEvent(
   fixture: HistoryFixture,
@@ -424,6 +438,32 @@ function selectPruningWindow(
 function selectedPruningWindow(): PruneTokenUsageEventsArgs {
   if (pruningWindow === null) throw new Error("Expected a pruning window");
   return pruningWindow;
+}
+
+function lastTurnCompletion(fixture: HistoryFixture) {
+  return {
+    sequence: lastTurn(fixture).completedSequence,
+    threadId: fixture.threadId,
+  };
+}
+
+function selectCompletionReceipt(
+  db: DbConnection,
+  fixture: HistoryFixture,
+): void {
+  completionReceipt =
+    db.$client
+      .prepare<[string, number], CompletionReceipt>(
+        "SELECT id, json_extract(data, '$.status') AS status FROM events WHERE thread_id = ? AND sequence = ? AND type = 'turn/completed'",
+      )
+      .get(fixture.threadId, lastTurn(fixture).completedSequence) ?? null;
+}
+
+function selectedCompletionReceipt(): CompletionReceipt {
+  if (completionReceipt === null) {
+    throw new Error("Expected a stored turn/completed receipt");
+  }
+  return completionReceipt;
 }
 
 function batchTurnKeys(fixture: HistoryFixture) {
@@ -1058,6 +1098,56 @@ export const EVENTS_COST_CASES: readonly QueryCostCase[] = [
       }),
   },
   {
+    name: `${EVENTS}#findStoredEventReceipt`,
+    prepare: selectCompletionReceipt,
+    run: (db) => findStoredEventReceipt(db, selectedCompletionReceipt().id),
+  },
+  {
+    name: `${EVENTS}#markTurnCompletionParentNoticeHandled`,
+    run: (db, fixture) =>
+      db.transaction((tx) =>
+        markTurnCompletionParentNoticeHandled(tx, lastTurnCompletion(fixture)),
+      ),
+  },
+  {
+    name: `${EVENTS}#markEventLifecycleApplied`,
+    run: (db, fixture) =>
+      db.transaction((tx) =>
+        markEventLifecycleApplied(tx, lastTurnCompletion(fixture)),
+      ),
+  },
+  {
+    name: `${EVENTS}#isEventLifecycleApplied`,
+    prepare: (db, fixture) =>
+      markEventLifecycleApplied(db, lastTurnCompletion(fixture)),
+    run: (db, fixture) =>
+      isEventLifecycleApplied(db, lastTurnCompletion(fixture)),
+  },
+  {
+    name: `${EVENTS}#hasHandledRootTurnCompletion`,
+    prepare: (db, fixture) => {
+      selectCompletionReceipt(db, fixture);
+      markTurnCompletionParentNoticeHandled(db, lastTurnCompletion(fixture));
+    },
+    run: (db, fixture) =>
+      hasHandledRootTurnCompletion(db, {
+        status: selectedCompletionReceipt().status,
+        threadId: fixture.threadId,
+        throughSequence: fixture.latestSequence,
+        turnId: lastTurn(fixture).turnId,
+      }),
+  },
+  {
+    name: `${EVENTS}#hasRootTurnSupersessionAfter`,
+    run: (db, fixture) =>
+      hasRootTurnSupersessionAfter(db, {
+        afterSequence: lastTurn(fixture).completedSequence,
+        interruptionsSupersede: true,
+        threadId: fixture.threadId,
+        turnId: lastTurn(fixture).turnId,
+      }),
+  },
+  {
     name: `${EVENTS}#listStoredThreadInteractionLifecycleRows`,
     run: (db, fixture) =>
       listStoredThreadInteractionLifecycleRows(db, {
@@ -1143,13 +1233,6 @@ export const EVENTS_COST_CASES: readonly QueryCostCase[] = [
       }),
   },
   {
-    name: `${EVENTS}#getLatestStoredConversationOutlineSequence`,
-    run: (db, fixture) =>
-      getLatestStoredConversationOutlineSequence(db, {
-        threadId: fixture.threadId,
-      }),
-  },
-  {
     name: `${EVENTS}#getStoredConversationOutlineProjectionState`,
     growsWith: {
       history:
@@ -1158,6 +1241,7 @@ export const EVENTS_COST_CASES: readonly QueryCostCase[] = [
     run: (db, fixture) =>
       getStoredConversationOutlineProjectionState(db, {
         classificationSequenceStart: 0,
+        knownIncludeNestedEvents: false,
         sequenceStart: 0,
         summaryCompactionDeltaThreshold: 1_000,
         threadId: fixture.threadId,
@@ -1672,6 +1756,15 @@ export const EVENTS_COST_CASES: readonly QueryCostCase[] = [
       }),
   },
   {
+    name: `${EVENTS}#hasThreadHistoryEditAfter`,
+    run: (db, fixture) =>
+      hasThreadHistoryEditAfter(db, {
+        afterSequence: lastTurn(fixture).completedSequence,
+        cutoffAtOrBeforeSequence: lastTurn(fixture).completedSequence,
+        threadId: fixture.threadId,
+      }),
+  },
+  {
     name: `${EVENTS}#findLatestEditableUserTurnRequestRow`,
     run: (db, fixture) =>
       findLatestEditableUserTurnRequestRow(db, {
@@ -1799,6 +1892,10 @@ export const EVENTS_COST_CASES: readonly QueryCostCase[] = [
         provisioningId: "provisioning-in-flight",
         threadId: fixture.threadId,
       }),
+  },
+  {
+    name: `${EVENTS}#clearThreadConversationOutlines`,
+    run: (db) => clearThreadConversationOutlines(db),
   },
   ...LIVE_TURN_COST_CASES,
 ];

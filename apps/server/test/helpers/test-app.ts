@@ -1,13 +1,15 @@
+import { closeThreadReader } from "../../src/services/threads/thread-reads.js";
 import { installDefaultEnvironmentProviders } from "./environment-provider.js";
 import { registerTestHarnessWarmup } from "./test-harness-warmup.js";
 import { setPluginEnvironmentProviderBridge } from "../../src/services/plugins/plugin-environment-provider-registry.js";
 import { clearAllThreadProvisionSchedules } from "../../src/services/threads/thread-startup-store.js";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { serve } from "@hono/node-server";
 import type { AddressInfo } from "node:net";
 import {
+  createConnection,
   ensurePersonalProject,
   getAppSettings,
   getDisabledProviderIds,
@@ -98,6 +100,8 @@ export async function installTestBuiltinPlugin(
 }
 
 export type TestAppHarnessConfigOverrides = Partial<ServerRuntimeConfig> & {
+  fileBackedDb?: boolean;
+  storage?: { dataDir: string; db: DbConnection };
   appUpdateService?: AppUpdateService;
   cliCommandService?: CliCommandService;
   terminalAttachTimeoutMs?: number;
@@ -163,6 +167,7 @@ export async function createTestAppHarness(
   overrides: TestAppHarnessConfigOverrides = {},
 ): Promise<TestAppHarness> {
   const {
+    fileBackedDb = false,
     appUpdateService,
     cliCommandService,
     terminalAttachTimeoutMs = TEST_TERMINAL_RPC_TIMEOUT_MS,
@@ -171,11 +176,22 @@ export async function createTestAppHarness(
     nativeRootsClock,
     liveCommandsClock,
     seedFirstPartyProviders = true,
+    storage,
     ...configOverrides
   } = overrides;
   const logger = createTestLogger();
-  const dataDir = await mkdtemp(join(tmpdir(), "bb-server-test-"));
-  const db = createTestDb();
+  const dataDir =
+    storage?.dataDir ?? (await mkdtemp(join(tmpdir(), "bb-server-test-")));
+  let db = storage?.db ?? createTestDb();
+  if (storage === undefined && fileBackedDb) {
+    const filename = join(dataDir, "test.db");
+    try {
+      await writeFile(filename, db.$client.serialize());
+    } finally {
+      db.$client.close();
+    }
+    db = createConnection(filename);
+  }
   setAppSettings(db, {
     ...getAppSettings(db),
     machineGitCredentialsEnabled: false,
@@ -392,16 +408,20 @@ export async function createTestAppHarness(
     pluginCatalogService,
     serverMove,
     async cleanup(): Promise<void> {
+      await closeThreadReader(db);
       clearAllThreadProvisionSchedules();
       setPluginEnvironmentProviderBridge(undefined);
       await pluginService.stop();
       await walCheckpointer.stop();
-      await rm(dataDir, {
-        recursive: true,
-        force: true,
-        maxRetries: 10,
-        retryDelay: 50,
-      });
+      if (storage === undefined && fileBackedDb) db.$client.close();
+      if (storage === undefined) {
+        await rm(dataDir, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 50,
+        });
+      }
     },
   };
 }

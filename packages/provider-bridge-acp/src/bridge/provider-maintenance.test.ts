@@ -81,6 +81,7 @@ describe("ACP provider maintenance", () => {
             command,
             maintenance: undefined,
             env: process.env,
+            executableConfigured: false,
           }),
         ).toMatchObject({
           supported: true,

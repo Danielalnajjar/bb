@@ -143,6 +143,7 @@ interface StartIdleProviderSessionReaperArgs {
 interface CreateHostDaemonAppOptions {
   dataDir: string;
   serverUrl: string;
+  connectOrigin?: string;
   hostKey: string;
   bridgeBundleDir?: string;
   hostId: string;
@@ -582,6 +583,7 @@ export async function createHostDaemonApp(
   });
   const connectTunnel = new ConnectTunnelClient({
     serverUrl: options.serverUrl,
+    connectOrigin: options.connectOrigin,
     hostName: options.hostName,
     machineCredential: options.serverHeaders?.["x-bb-connect-machine"],
     fetchFn: options.fetchFn,

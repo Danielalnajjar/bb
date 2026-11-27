@@ -52,6 +52,9 @@ export function acpProviderDeclaration(
     ...(agent.visibility === undefined
       ? {}
       : { experimental_visibility: agent.visibility }),
+    ...(agent.launch.commandEnv === undefined
+      ? {}
+      : { env: { passthrough: [agent.launch.commandEnv] } }),
     ...(agent.launch.nativeSkillRoots === undefined
       ? {}
       : {

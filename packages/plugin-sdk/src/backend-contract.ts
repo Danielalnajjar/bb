@@ -1462,6 +1462,8 @@ export interface PluginProviderOptionsContext {
   model: string;
   /** BB's permission mode for this command (already clamped to the host). */
   permissionMode: PluginProviderPermissionMode;
+  /** Persisted auto-compaction trigger in tokens, when the thread has one. */
+  autoCompactTokenLimit?: number;
   /**
    * `"plan"` when the prompt entered plan mode through this provider's
    * declared `plan` composer action. Absent for an ordinary prompt — plan

@@ -256,6 +256,7 @@ change the host-daemon protocol.
 | `BB_EXTERNAL_URL`              | `bb-app env`, or environment                       | Startup-only            | Internet-facing HTTPS base URL for generated public links; the fallback for `machineServerUrl`.                                                                                                                                                                                                                                     |
 | `BB_MARKETPLACE_URL`           | `bb-app env`, or environment                       | Startup-only testing    | Manifest URL of the reserved `bb-community` marketplace. Default `https://getbb.app/marketplace/v2/marketplace.json` (falls back to v1 on 404); a custom URL is requested without fallback. Changes only `bb-community`.                                                                                                            |
 | `BB_SERVER_URL`                | `bb-app config`                                    | Remote CLI/host use     | Server targeted by the standalone `bb` CLI and `host-daemon` commands on this machine. Defaults to `http://127.0.0.1:38886`. It does not change where `npx bb-app` binds.                                                                                                                                                           |
+| `BB_CONNECT_ORIGIN`            | `bb-app config`, env, or `--connect-origin`        | Daemon startup-only     | Trusted Connect cloud origin, separate from `BB_SERVER_URL`. Used for label assignment, machine tunnels, and share URLs. Unset preserves the enrollment/server URL behavior.                                                                                                                                                        |
 | `BB_SERVER_BIND_HOST`          | `bb-app env`, environment, or `--server-bind-host` | Startup-only            | Server listener host: `127.0.0.1` (default) or `0.0.0.0`. Not a `bb-app config` key. See [Startup Flags](#startup-flags).                                                                                                                                                                                                           |
 | `BB_SERVER_PORT`               | `bb-app env`, environment, or `--server-port`      | Startup-only            | HTTP listener port. Defaults to `38886`.                                                                                                                                                                                                                                                                                            |
 | `BB_HOST_DAEMON_PORT`          | `bb-app env`, environment, or `--host-daemon-port` | Startup-only            | Local host-daemon API port. Defaults to `38887`.                                                                                                                                                                                                                                                                                    |
@@ -494,8 +495,10 @@ Resume interrupted threads after a restart is available in Settings → General 
     background command its agent was waiting on (the retry re-runs the
     thread's latest turn).
 
-  The retry is the same row as `bb thread retry`, titled "Resume after bb
-  restarted" in the app's queue and in `bb thread queue list`. When the provider had
+  The reason "bb restarted" is reserved for automatic restart recovery and
+  cannot be supplied to `bb thread retry --reason`. The retry is the same row
+  as `bb thread retry`, titled "Resume after bb restarted" in the app's queue
+  and in `bb thread queue list`. When the provider had
   accepted the turn's input, it sends an agent-only message instead of
   "Please continue.": it says bb restarted, names the command the turn was
   running and any background work the restart stopped (command and
@@ -508,6 +511,12 @@ Resume interrupted threads after a restart is available in Settings → General 
   attempt 4 (three restarts in a row). A child thread that resumes does not notify its parent
   that it was interrupted; the parent hears when the child finishes.
   `bb thread wait` keeps waiting on a thread whose resume is queued.
+
+  A plugin can hold a thread's automatic restart resume. If the hold is already
+  in place, bb does not queue a continuation. If it starts after a continuation
+  was queued, the retry stays queued without changing its schedule. Clearing the
+  last hold makes the retry eligible for automatic dispatch again; **Send now**
+  overrides the hold. This does not pause ordinary messages or retries.
   Updating bb counts as a restart, so threads that Update now (or
   `bb updates app apply --yes`) cuts resume after the update. With the
   setting on, the Update now dialog, the CLI prompt, and the
@@ -519,10 +528,11 @@ Resume interrupted threads after a restart is available in Settings → General 
   queued, the queue does not automatically send the thread's other rows; one
   that comes up is re-queued as `thread-busy` and sends after the retry's turn
   ends. That is what keeps messages queued or steered while the daemon was down
-  behind the resume. Without the experiment, a `--send-at` message or a row a
-  plugin releases can go out ahead of a retry scheduled for later (for example
-  a provider-retry row waiting hours for a subscription window) and overtake
-  it; with it, those rows wait for the retry.
+  behind the resume. A held restart retry does not block other rows through
+  retry priority, but an ordinary live retry still does. Without the experiment,
+  a `--send-at` message or a row a plugin releases can go out ahead of a retry
+  scheduled for later (for example a provider-retry row waiting hours for a
+  subscription window) and overtake it; with it, those rows wait for the retry.
 
 ## AI services
 
@@ -777,6 +787,16 @@ section or with `bb acp registry`, `bb acp add <agent-id>`, and
 `bb acp remove <agent-id>`. An added agent is a `customAgents` entry running
 the registry's `npx` or `uvx` package on the thread's host.
 
+The built-in Cursor provider (`acp-cursor`) runs `cursor-agent`. Set
+`BB_CURSOR_AGENT_EXECUTABLE` in a machine's host-daemon environment to run
+another executable there instead, for both model discovery
+(`<executable> --list-models`) and threads (`<executable> acp`); other machines
+keep `cursor-agent`. Use a full path, and restart bb on that machine after
+changing it. While it is set, the machine reports Cursor ready only when the
+executable exists and `<executable> --version` exits successfully; bb's Cursor
+install, sign-in, and usage readings, which target the official CLI, are off
+there.
+
 ## Custom Models
 
 Register extra picker models with top-level `customModels` in
@@ -947,6 +967,31 @@ These secret fields are omitted from `bb-app config list`.
 The Settings → Machines installer assigns each standalone daemon a stable local
 API port, persisted in the machine data directory; its command accepts
 `--host-daemon-port <port>` when an explicit port is needed.
+
+### Host-local Connect origin
+
+When a host daemon connects directly to its BB server, configure its original
+Connect relay origin independently of the transport URL:
+
+```sh
+bb-app --data-dir <machine-data-dir> config set BB_CONNECT_ORIGIN https://owner.getbb.app
+bb-host-daemon --data-dir <machine-data-dir> --server-url https://server.example:444 --connect-origin https://owner.getbb.app
+```
+
+`BB_CONNECT_ORIGIN` is stored as top-level `connectOrigin` in that machine's
+`config.json`; `bb-app config unset BB_CONNECT_ORIGIN` removes it. Precedence is
+`--connect-origin`, then `connectOrigin`, then `BB_CONNECT_ORIGIN` from the local
+environment (including `bb-app env`). Changes apply at the next daemon start.
+Existing service arguments and the transport URL are not rewritten by this setting.
+
+The value must be a bare HTTPS relay origin (`<handle>.<connect-domain>`),
+without user information, path, query or fragment, not an apex or IP address.
+Local Connect development accepts HTTP `<handle>.bb.localhost:<port>` origins
+instead, using the existing local tunnel/share protocol rules.
+When absent, the daemon keeps using its enrollment/server URL, including local
+Connect. This is a host-local trust decision: server sessions,
+machine environment updates and label responses cannot replace it. Label
+assignment does not follow HTTP redirects with the machine credential.
 
 ### Machine environment
 

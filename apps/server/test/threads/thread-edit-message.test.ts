@@ -3,6 +3,7 @@ import {
   createQueuedThreadMessage,
   createPendingInteraction,
   createPromptHistoryEntry,
+  getLatestThreadSequence,
   getThread,
   listActiveBackgroundTaskCountsByThreadIds,
   listOpenBackgroundTaskItemRowsForThread,
@@ -18,7 +19,10 @@ import {
   type ThreadEventTurnStatus,
   type ThreadStatus,
 } from "@bb/domain";
-import { threadResponseSchema } from "@bb/server-contract";
+import {
+  threadResponseSchema,
+  threadTimelineResponseSchema,
+} from "@bb/server-contract";
 import { describe, expect, it, vi } from "vitest";
 import { editThreadMessage } from "../../src/services/threads/thread-edit-message.js";
 import { requestThreadStopForCurrentState } from "../../src/services/threads/thread-lifecycle.js";
@@ -291,6 +295,60 @@ function seedEditableThread(
 }
 
 describe("editThreadMessage", () => {
+  it("rejects an older timeline cursor after an edit advances the head and retains its anchor", async () => {
+    await withTestHarness(async (harness) => {
+      const { environment, thread } = seedEditableThread(harness);
+      seedTurn(harness, {
+        providerThreadId: "provider-original",
+        providerCheckpointId: "checkpoint-third",
+        requestSequence: 12,
+        text: "Third message",
+        threadId: thread.id,
+        turnId: "turn-third",
+      });
+      const threadKey = { threadId: thread.id };
+      const path = `/api/v1/threads/${thread.id}/timeline?segmentLimit=2`;
+      const latest = threadTimelineResponseSchema.parse(
+        await readJson(await harness.app.request(path)),
+      );
+      const cursor = latest.timelinePage.olderCursor;
+      if (cursor === null) throw new Error("Expected an older-page cursor");
+      const olderPath = `${path}&beforeAnchorSeq=${cursor.anchorSeq}&beforeAnchorId=${encodeURIComponent(cursor.anchorId)}`;
+      expect((await harness.app.request(olderPath)).status).toBe(200);
+      const oldMax = getLatestThreadSequence(harness.db, threadKey);
+
+      const edit = editThreadMessage(harness.deps, {
+        environment,
+        thread,
+        payload: {
+          operationId: "edit-with-older-cursor",
+          expectedRequestSequence: 12,
+          input: [{ type: "text", text: "Replacement", mentions: [] }],
+        },
+      });
+      const rewind = await waitForQueuedCommand(
+        harness,
+        (queued) => queued.command.type === "thread.rewind.prepare",
+      );
+      await reportQueuedCommandSuccess(harness, rewind, {
+        providerThreadId: "provider-staged-rewind",
+      });
+      await expect(edit).resolves.toMatchObject({ ok: true });
+      expect(getLatestThreadSequence(harness.db, threadKey)).toBeGreaterThan(
+        oldMax,
+      );
+      expect(
+        listEvents(harness.db, threadKey).map((event) => event.sequence),
+      ).toContain(cursor.anchorSeq);
+      const older = await harness.app.request(olderPath);
+      expect(older.status).toBe(400);
+      expect(await older.json()).toMatchObject({
+        code: "invalid_request",
+        message: expect.stringContaining("reload the latest page"),
+      });
+    });
+  });
+
   it("preserves an agent caller and applies agent permission policy", async () => {
     await withTestHarness(async (harness) => {
       const { environment, thread } = seedEditableThread(harness, {

@@ -1,6 +1,7 @@
 import {
   getEnvironment,
   getThread,
+  getThreadCodexAutoCompactTokenLimit,
   hasLiveChildThread,
   hasStoredSpawnAgentToolCall,
 } from "@bb/db";
@@ -214,6 +215,10 @@ function toRuntimeExecutionOptions(
     input: args.input,
     providerId: args.providerId,
   });
+  const compactLimit = getThreadCodexAutoCompactTokenLimit(
+    args.deps.db,
+    args.threadId,
+  );
   const providerOptions =
     args.deps.providerRegistry.get(args.providerId)?.deriveProviderOptions({
       threadId: args.threadId,
@@ -221,6 +226,9 @@ function toRuntimeExecutionOptions(
       model: args.execution.model,
       permissionMode,
       ...(promptMode !== undefined ? { promptMode } : {}),
+      ...(compactLimit !== undefined
+        ? { autoCompactTokenLimit: compactLimit }
+        : {}),
     }) ?? {};
   const sessionOptions = resolvePendingThreadSessionOptions(
     args.deps.db,
@@ -231,18 +239,19 @@ function toRuntimeExecutionOptions(
     args.projectId,
     args.hostId,
   );
-  const model = args.deps.lifecycleDedupers.providerModelCatalogs.getCachedModel(
-    args.deps,
-    {
-      hostId: args.hostId,
-      providerId: args.providerId,
-      workspacePaths:
-        checkoutPath === undefined
-          ? [args.workspacePath]
-          : [args.workspacePath, checkoutPath],
-      model: args.execution.model,
-    },
-  );
+  const model =
+    args.deps.lifecycleDedupers.providerModelCatalogs.getCachedModel(
+      args.deps,
+      {
+        hostId: args.hostId,
+        providerId: args.providerId,
+        workspacePaths:
+          checkoutPath === undefined
+            ? [args.workspacePath]
+            : [args.workspacePath, checkoutPath],
+        model: args.execution.model,
+      },
+    );
   const reasoningLevel =
     model === null ||
     model.supportedReasoningEfforts.some(

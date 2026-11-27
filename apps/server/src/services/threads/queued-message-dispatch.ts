@@ -3,6 +3,7 @@ import { isMachineWaitingForExecution } from "../machines/lifecycle.js";
 import { isServerMoveFrozen } from "../server-move/freeze-state.js";
 import { waitForMachineMaintenance } from "../machines/provider-orchestration.js";
 import {
+  getDueUnscheduledRestartResume,
   getQueuedThreadMessage,
   getThread,
   listDueScheduledQueuedThreadMessages,
@@ -30,7 +31,10 @@ import {
   isPluginDispatchRequeuedRecently,
 } from "./dispatch-hooks.js";
 import { recordQueuedMessageDrainFailure } from "./queue-drain-failure.js";
-import { clearQueuedMessageWait } from "./queue-waits.js";
+import {
+  clearQueuedMessageWait,
+  releaseTurnEndPluginHolds,
+} from "./queue-waits.js";
 import { defineItemSweep, type ItemSweep } from "../system/item-sweep.js";
 import {
   createAutomaticQueuedMessageGroupEligibility,
@@ -53,6 +57,7 @@ export type QueuedMessageDispatchWake =
   | { kind: "host-connected"; hostId: string }
   | { kind: "app-update-released" }
   | { kind: "time-reached"; now: number }
+  | { kind: "restart-resume-released"; threadId: string }
   | { kind: "plugin-recheck" }
   | { kind: "plugin-unregistered"; pluginId: string }
   | { kind: "idle-recovery"; now: number }
@@ -124,6 +129,7 @@ function dispatchWakeContext(
     case "thread-ready":
     case "turn-started":
     case "interaction-settled":
+    case "restart-resume-released":
       return { threadId: wake.threadId, wake: wake.kind };
     case "edit-released":
       return {
@@ -261,16 +267,9 @@ async function executePreparedQueuedMessageDispatch(
         deps.db,
         wake.hostId,
       )) {
-        for (const row of listQueuedThreadMessagesWaitingOnKind(deps.db, {
-          kind: "host-offline",
-          threadId,
-        })) {
-          await attemptAutomaticQueuedMessage(deps, row, {
-            now: Date.now(),
-            respectRequeuePacing: false,
-            retryingFailure: false,
-          });
-        }
+        await offerHostOfflineQueuedMessages(deps, threadId, {
+          respectRequeuePacing: false,
+        });
       }
       return;
     case "app-update-released":
@@ -314,6 +313,24 @@ async function executePreparedQueuedMessageDispatch(
     case "time-reached":
       await dueScheduledQueueSweep(deps, wake.now).run(deps, wake.now);
       return;
+    case "restart-resume-released": {
+      const now = Date.now();
+      const dueRows = listDueScheduledQueuedThreadMessages(
+        deps.db,
+        now,
+        wake.threadId,
+      );
+      const row = getDueUnscheduledRestartResume(deps.db, wake.threadId, now);
+      if (row !== undefined) await attemptQueuedMessageNow(deps, row);
+      for (const due of dueRows) {
+        await attemptAutomaticQueuedMessage(deps, due, {
+          now,
+          respectRequeuePacing: true,
+          retryingFailure: false,
+        });
+      }
+      return;
+    }
     case "idle-recovery":
       releaseStaleQueuedMessageDispatchClaims(deps, wake.now);
       await idleThreadQueueSweep(deps).run(deps, wake.now);
@@ -327,6 +344,34 @@ async function executePreparedQueuedMessageDispatch(
   }
 }
 
+async function offerHostOfflineQueuedMessages(
+  deps: QueueDispatchDeps,
+  threadId: string,
+  args: { respectRequeuePacing: boolean },
+): Promise<void> {
+  for (const row of listQueuedThreadMessagesWaitingOnKind(deps.db, {
+    kind: "host-offline",
+    threadId,
+  })) {
+    await attemptAutomaticQueuedMessage(deps, row, {
+      now: Date.now(),
+      respectRequeuePacing: args.respectRequeuePacing,
+      retryingFailure: false,
+    });
+  }
+}
+
+function listThreadIdsParkedOnConnectedHosts(
+  deps: QueueDispatchDeps,
+): string[] {
+  return deps.hub
+    .listConnectedHostIds()
+    .filter((hostId) => !isMachineWaitingForExecution(deps, hostId))
+    .flatMap((hostId) =>
+      listThreadIdsWithHostOfflineQueueWaits(deps.db, hostId),
+    );
+}
+
 async function runThreadReadyDispatch(
   deps: QueueDispatchDeps,
   threadId: string,
@@ -335,6 +380,7 @@ async function runThreadReadyDispatch(
     await deps.lifecycleDedupers.queuedMessageDispatch.run(
       threadId,
       async () => {
+        releaseTurnEndPluginHolds(deps, threadId);
         await sendNextQueuedMessageIfPresent(deps, { threadId });
       },
     );
@@ -489,12 +535,13 @@ async function attemptAutomaticQueuedMessage(
       );
       return;
     }
-    recordQueuedMessageDrainFailure(deps, {
+    const handled = recordQueuedMessageDrainFailure(deps, {
       error,
       now: args.now,
       row,
       thread,
     });
+    if (!handled) return;
     deps.logger.warn(
       {
         queuedMessageId: row.id,
@@ -602,6 +649,7 @@ export function failedQueueRetrySweep(
 }
 
 type IdleQueueRecoveryItem =
+  | { kind: "host-returned-thread"; threadId: string }
   | { kind: "idle-thread"; threadId: string }
   | { kind: "busy-thread-notice"; row: QueuedMessageDispatchRef };
 
@@ -610,6 +658,12 @@ export function idleThreadQueueSweep(deps: QueueDispatchDeps): ItemSweep {
     name: "queued-message-auto-send",
     concurrency: 1,
     list: () => [
+      ...listThreadIdsParkedOnConnectedHosts(deps).map(
+        (threadId): IdleQueueRecoveryItem => ({
+          kind: "host-returned-thread",
+          threadId,
+        }),
+      ),
       ...listIdleThreadsWithQueuedMessages(deps.db).map(
         (candidate): IdleQueueRecoveryItem => ({
           kind: "idle-thread",
@@ -620,18 +674,32 @@ export function idleThreadQueueSweep(deps: QueueDispatchDeps): ItemSweep {
         (row): IdleQueueRecoveryItem => ({ kind: "busy-thread-notice", row }),
       ),
     ],
-    key: (item) =>
-      item.kind === "idle-thread"
-        ? `thread:${item.threadId}`
-        : `notice:${item.row.id}`,
-    process: (item) =>
-      item.kind === "idle-thread"
-        ? runThreadReadyDispatch(deps, item.threadId)
-        : attemptAutomaticQueuedMessage(deps, item.row, {
+    key: (item) => {
+      switch (item.kind) {
+        case "host-returned-thread":
+          return `host-offline:${item.threadId}`;
+        case "idle-thread":
+          return `thread:${item.threadId}`;
+        case "busy-thread-notice":
+          return `notice:${item.row.id}`;
+      }
+    },
+    process: (item) => {
+      switch (item.kind) {
+        case "host-returned-thread":
+          return offerHostOfflineQueuedMessages(deps, item.threadId, {
+            respectRequeuePacing: true,
+          });
+        case "idle-thread":
+          return runThreadReadyDispatch(deps, item.threadId);
+        case "busy-thread-notice":
+          return attemptAutomaticQueuedMessage(deps, item.row, {
             now: Date.now(),
             respectRequeuePacing: true,
             retryingFailure: false,
-          }),
+          });
+      }
+    },
   });
 }
 
