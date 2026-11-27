@@ -42,7 +42,9 @@ export interface MachineEnrollments {
   prepare(request: {
     key: string;
     signal: AbortSignal;
+    reEnroll?: boolean;
   }): Promise<MachineEnrollment>;
+  revokeEnrollKeys(key: string): Promise<void>;
   waitForConnection(request: {
     enrollmentId: string;
     timeoutMs: number;
@@ -55,6 +57,11 @@ interface EnrollmentServiceDependencies {
   machineAuth: MachineAuthService;
   serverAccess: {
     resolve(request: {
+      key: string;
+      hostId: string;
+      signal: AbortSignal;
+    }): Promise<ServerAccessGrant>;
+    repair?(request: {
       key: string;
       hostId: string;
       signal: AbortSignal;
@@ -92,6 +99,7 @@ export function createMachineEnrollmentService(
     { owner: string; launchKey: string; bootstrap: EnrollmentBootstrap }
   >();
   const locks = new Map<string, Promise<unknown>>();
+  const reEnrolled = new Map<string, string>();
 
   function hasIssuedDaemonCredential(hostId: string): boolean {
     return hasEnabledAuthApiKeyForHost(deps.db, {
@@ -135,35 +143,100 @@ export function createMachineEnrollmentService(
         const lockKey = JSON.stringify([owner, request.key]);
         return runSerialized(locks, lockKey, async () => {
           request.signal.throwIfAborted();
-          const host = getNonDestroyedHostByLaunchKey(deps.db, request.key);
-          if (!host) throw new Error("Machine creation host was not found");
-          if (
-            host.phase === "destroyed" ||
-            (host.phase === "removing" && !isHostCleanupAllowed(deps, host.id))
-          )
-            throw new Error("Machine enrollment was cancelled");
-          if (
-            getMachineProvider(host.machineProviderId ?? "")?.pluginId !== owner
-          )
-            throw new Error("Machine creation belongs to a different plugin");
-          if (host.lastSeenAt !== null || deps.isConnected(host.id)) {
+          function evaluateHost(expectedHostId?: string) {
+            const current = expectedHostId
+              ? getHost(deps.db, expectedHostId)
+              : getNonDestroyedHostByLaunchKey(deps.db, request.key);
+            if (!current)
+              throw new Error(
+                expectedHostId
+                  ? "Machine enrollment was cancelled"
+                  : "Machine creation host was not found",
+              );
+            if (
+              (expectedHostId && current.launchKey !== request.key) ||
+              current.destroyedAt !== null ||
+              current.phase === "destroyed" ||
+              (current.phase === "removing" &&
+                !isHostCleanupAllowed(deps, current.id))
+            )
+              throw new Error("Machine enrollment was cancelled");
+            if (
+              getMachineProvider(current.machineProviderId ?? "")?.pluginId !==
+              owner
+            )
+              throw new Error("Machine creation belongs to a different plugin");
+
+            const connected = deps.isConnected(current.id);
+            const allowReEnroll =
+              request.reEnroll === true &&
+              current.phase === "resuming" &&
+              !connected;
+            const enrolled =
+              connected ||
+              (!allowReEnroll &&
+                (current.lastSeenAt !== null || request.reEnroll === true));
+            return { host: current, allowReEnroll, enrolled };
+          }
+
+          const initial = evaluateHost();
+          const { host, allowReEnroll } = initial;
+          function finishEnrolled(): MachineEnrollment {
             pending.delete(host.id);
+            reEnrolled.delete(lockKey);
             return { id: host.id, hostId: host.id, state: "enrolled" };
           }
-          const grant = await deps.serverAccess.resolve({
+          if (initial.enrolled) return finishEnrolled();
+          const acquireAccess = allowReEnroll
+            ? deps.serverAccess.repair
+            : deps.serverAccess.resolve;
+          if (!acquireAccess)
+            throw new Error("Server access repair is unavailable");
+          const accessRequest = {
             key: lockKey,
             hostId: host.id,
             signal: AbortSignal.any([
               request.signal,
               AbortSignal.timeout(60_000),
             ]),
-          });
+          };
+          const grant = await acquireAccess.call(
+            deps.serverAccess,
+            accessRequest,
+          );
           request.signal.throwIfAborted();
+          const afterAccess = evaluateHost(host.id);
+          if (
+            afterAccess.enrolled ||
+            afterAccess.allowReEnroll !== allowReEnroll
+          )
+            return finishEnrolled();
+
           await deps.machineAuth.revokeHostEnrollKeys({ hostId: host.id });
           const credential = await deps.machineAuth.issueHostEnrollKey({
             hostId: host.id,
             enrollSource: "public-multi-machine",
           });
+
+          async function revokeIssuedKey() {
+            await deps.machineAuth.revokeHostEnrollKeys({ hostId: host.id });
+            reEnrolled.delete(lockKey);
+          }
+          let postIssue;
+          try {
+            request.signal.throwIfAborted();
+            postIssue = evaluateHost(host.id);
+          } catch (error) {
+            await revokeIssuedKey();
+            request.signal.throwIfAborted();
+            throw error;
+          }
+          if (postIssue.enrolled || postIssue.allowReEnroll !== allowReEnroll) {
+            await revokeIssuedKey();
+            request.signal.throwIfAborted();
+            return finishEnrolled();
+          }
+
           const expiresAt = credential.expiresAt;
           const result: Extract<MachineEnrollment, { state: "pending" }> = {
             id: host.id,
@@ -179,16 +252,38 @@ export function createMachineEnrollmentService(
               expiresAt,
             },
           };
-          if (request.signal.aborted) {
-            await deps.machineAuth.revokeHostEnrollKeys({ hostId: host.id });
-            request.signal.throwIfAborted();
+          if (allowReEnroll) {
+            pending.delete(host.id);
+            reEnrolled.set(lockKey, host.id);
+          } else {
+            pending.set(host.id, {
+              owner,
+              launchKey: request.key,
+              bootstrap: result.bootstrap,
+            });
           }
-          pending.set(host.id, {
-            owner,
-            launchKey: request.key,
-            bootstrap: result.bootstrap,
-          });
           return result;
+        });
+      },
+      async revokeEnrollKeys(key) {
+        if (!key.trim()) return;
+        const lockKey = JSON.stringify([owner, key]);
+        await runSerialized(locks, lockKey, async () => {
+          const trackedHostId = reEnrolled.get(lockKey);
+          if (trackedHostId !== undefined) {
+            await deps.machineAuth.revokeHostEnrollKeys({
+              hostId: trackedHostId,
+            });
+            reEnrolled.delete(lockKey);
+            return;
+          }
+          const host = getNonDestroyedHostByLaunchKey(deps.db, key);
+          if (
+            !host ||
+            getMachineProvider(host.machineProviderId ?? "")?.pluginId !== owner
+          )
+            return;
+          await deps.machineAuth.revokeHostEnrollKeys({ hostId: host.id });
         });
       },
       async waitForConnection({ enrollmentId, timeoutMs, signal }) {
@@ -205,6 +300,9 @@ export function createMachineEnrollmentService(
             throw new Error("Machine enrollment was cancelled");
           if (deps.isConnected(host.id)) {
             pending.delete(host.id);
+            for (const [lockKey, trackedHostId] of reEnrolled) {
+              if (trackedHostId === host.id) reEnrolled.delete(lockKey);
+            }
             return {
               hostId: host.id,
               hostName:

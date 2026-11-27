@@ -33,9 +33,13 @@ const installerSource = readFile(INSTALL_MACHINE_SCRIPT_PATH, "utf8");
 
 function createOutputReporter(report: PluginMachineProviderProgress) {
   let pending = "";
+  let installationMissing = false;
   const tail: string[] = [];
   const emit = (line: string, terminated: boolean): void => {
     report.log(line + (terminated ? "\n" : ""));
+    installationMissing ||= line.includes(
+      "Machine installation was not found.",
+    );
     tail.push(line);
     if (tail.length > 20) tail.shift();
   };
@@ -53,6 +57,9 @@ function createOutputReporter(report: PluginMachineProviderProgress) {
       if (pending.length === 0) return;
       emit(pending, false);
       pending = "";
+    },
+    get installationMissing(): boolean {
+      return installationMissing;
     },
     failureMessage(): string {
       return tail.length === 0
@@ -74,22 +81,9 @@ export function createMachineBootstrapApi(
 ): MachineBootstrapApi {
   return {
     async bootstrap(request) {
-      request.signal.throwIfAborted();
-      request.report.step("Preparing machine enrollment");
-      try {
-        const enrollment = await enrollments.prepare({
-          key: request.key,
-          signal: request.signal,
-        });
-        request.signal.throwIfAborted();
-        request.report.step(
-          enrollment.state === "enrolled"
-            ? "Starting enrolled machine"
-            : "Bootstrapping machine",
-        );
-        const execution = await (enrollment.state === "enrolled"
-          ? installerStartCommand(enrollment.hostId)
-          : installerCommand(enrollment.bootstrap));
+      async function runInstaller(
+        execution: ReturnType<typeof installerCommand>,
+      ) {
         const output = createOutputReporter(request.report);
         let result;
         try {
@@ -104,7 +98,46 @@ export function createMachineBootstrapApi(
           throw new Error("Machine bootstrap command failed");
         }
         output.finish();
-        if (result.exitCode !== 0) throw new Error(output.failureMessage());
+        return { exitCode: result.exitCode, output };
+      }
+
+      request.signal.throwIfAborted();
+      request.report.step("Preparing machine enrollment");
+      let reEnrolled = false;
+      try {
+        const enrollment = await enrollments.prepare({
+          key: request.key,
+          signal: request.signal,
+        });
+        request.signal.throwIfAborted();
+        request.report.step(
+          enrollment.state === "enrolled"
+            ? "Starting enrolled machine"
+            : "Bootstrapping machine",
+        );
+        const execution = await (enrollment.state === "enrolled"
+          ? installerStartCommand(enrollment.hostId)
+          : installerCommand(enrollment.bootstrap));
+        const { exitCode, output } = await runInstaller(execution);
+        if (exitCode !== 0) {
+          if (enrollment.state !== "enrolled" || !output.installationMissing)
+            throw new Error(output.failureMessage());
+          const reEnrollment = await enrollments.prepare({
+            key: request.key,
+            signal: request.signal,
+            reEnroll: true,
+          });
+          if (reEnrollment.state !== "pending")
+            throw new Error(output.failureMessage());
+          reEnrolled = true;
+          request.signal.throwIfAborted();
+          request.report.step("Bootstrapping machine");
+          const reInstall = await runInstaller(
+            installerCommand(reEnrollment.bootstrap),
+          );
+          if (reInstall.exitCode !== 0)
+            throw new Error(reInstall.output.failureMessage());
+        }
         request.signal.throwIfAborted();
         request.report.step("Waiting for machine connection");
         await enrollments.waitForConnection({
@@ -114,7 +147,11 @@ export function createMachineBootstrapApi(
         });
         return { hostId: enrollment.hostId };
       } catch (error) {
-        enrollments.clearPending(request.key);
+        try {
+          enrollments.clearPending(request.key);
+        } catch {}
+        if (reEnrolled)
+          await enrollments.revokeEnrollKeys(request.key).catch(() => {});
         throw error;
       }
     },

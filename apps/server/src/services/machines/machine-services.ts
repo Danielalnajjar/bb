@@ -19,6 +19,7 @@ export function getMachineEnrollmentService(
       machineAuth: deps.machineAuth,
       serverAccess: {
         resolve: (request) => serverAccess.resolve(deps, request),
+        repair: (request) => serverAccess.repair(deps, request),
       },
       isConnected: (hostId) => deps.hub.hasDaemonForHost(hostId),
     });
